@@ -10,6 +10,7 @@ outputs/
 # Python cache
 __pycache__/
 *.pyc
+*.csv
 
 # Jupyter
 .ipynb_checkpoints/
