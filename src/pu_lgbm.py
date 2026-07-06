@@ -61,7 +61,38 @@ def sample_frame(frame: pd.DataFrame, mask: pd.Series, n: int, seed: int) -> pd.
     return subset.sample(n=n, random_state=seed)
 
 
+def pair_key(frame: pd.DataFrame) -> pd.Series:
+    return frame["term_id"].astype(str) + "\t" + frame["item_id"].astype(str)
+
+
+def load_train_term_negatives(path: Path, positives: pd.DataFrame) -> pd.DataFrame:
+    negatives = pd.read_csv(path, usecols=["term_id", "item_id"], dtype=str, keep_default_na=False)
+    negatives = negatives.drop_duplicates(["term_id", "item_id"]).reset_index(drop=True)
+    positive_keys = set(pair_key(positives))
+    keep = ~pair_key(negatives).isin(positive_keys)
+    dropped = int((~keep).sum())
+    negatives = negatives.loc[keep].reset_index(drop=True)
+    if negatives.empty:
+        raise ValueError(f"No usable negatives found in {path}")
+    if dropped:
+        print(f"dropped {dropped:,} negatives that overlap known positives")
+    print(f"using train-term negatives from {path} rows={len(negatives):,}")
+    return negatives
+
+
 def build_unlabeled_negatives(args: argparse.Namespace) -> pd.DataFrame:
+    negative_path = Path(args.negatives) if args.negatives else None
+    if negative_path and negative_path.exists():
+        positives = pd.read_csv(Path(args.data_dir) / "training_pairs.csv", usecols=["term_id", "item_id"], dtype=str)
+        return load_train_term_negatives(negative_path, positives)
+
+    if not args.allow_submission_negatives:
+        raise FileNotFoundError(
+            f"Train-term negatives were not found at {negative_path}. "
+            "Create train-term negatives first, or pass "
+            "`--allow-submission-negatives` to use the older submission-pair fallback."
+        )
+
     data_dir = Path(args.data_dir)
     pairs = pd.read_csv(data_dir / "submission_pairs.csv")
     scores = pd.read_csv(args.lexical_scores, usecols=["score"])
@@ -210,6 +241,8 @@ def main() -> None:
     train_cmd = sub.add_parser("train")
     train_cmd.add_argument("--data-dir", default="data")
     train_cmd.add_argument("--lexical-scores", default="outputs/lexical_scores.csv")
+    train_cmd.add_argument("--negatives", default="outputs/train_term_negatives.csv")
+    train_cmd.add_argument("--allow-submission-negatives", action="store_true")
     train_cmd.add_argument("--model", default="outputs/pu_lgbm.joblib")
     train_cmd.add_argument("--n-pos", type=int, default=0)
     train_cmd.add_argument("--n-low", type=int, default=350_000)

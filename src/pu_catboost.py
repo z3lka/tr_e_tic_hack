@@ -197,7 +197,38 @@ def sample_frame(frame: pd.DataFrame, mask: pd.Series, n: int, seed: int) -> pd.
     return subset.sample(n=n, random_state=seed)
 
 
+def pair_key(frame: pd.DataFrame) -> pd.Series:
+    return frame["term_id"].astype(str) + "\t" + frame["item_id"].astype(str)
+
+
+def load_train_term_negatives(path: Path, positives: pd.DataFrame) -> pd.DataFrame:
+    negatives = pd.read_csv(path, usecols=["term_id", "item_id"], dtype=str, keep_default_na=False)
+    negatives = negatives.drop_duplicates(["term_id", "item_id"]).reset_index(drop=True)
+    positive_keys = set(pair_key(positives))
+    keep = ~pair_key(negatives).isin(positive_keys)
+    dropped = int((~keep).sum())
+    negatives = negatives.loc[keep].reset_index(drop=True)
+    if negatives.empty:
+        raise ValueError(f"No usable negatives found in {path}")
+    if dropped:
+        print(f"dropped {dropped:,} negatives that overlap known positives")
+    print(f"using train-term negatives from {path} rows={len(negatives):,}")
+    return negatives
+
+
 def build_unlabeled_negatives(args: argparse.Namespace) -> pd.DataFrame:
+    negative_path = Path(args.negatives) if args.negatives else None
+    if negative_path and negative_path.exists():
+        positives = pd.read_csv(Path(args.data_dir) / "training_pairs.csv", usecols=["term_id", "item_id"], dtype=str)
+        return load_train_term_negatives(negative_path, positives)
+
+    if not args.allow_submission_negatives:
+        raise FileNotFoundError(
+            f"Train-term negatives were not found at {negative_path}. "
+            "Create train-term negatives first, or pass "
+            "`--allow-submission-negatives` to use the older submission-pair fallback."
+        )
+
     data_dir = Path(args.data_dir)
     pairs = pd.read_csv(data_dir / "submission_pairs.csv", usecols=["id", "term_id", "item_id"])
     scores = pd.read_csv(args.lexical_scores, usecols=["score"])
@@ -274,23 +305,30 @@ def train(args: argparse.Namespace) -> None:
     del x
     gc.collect()
 
-    model = CatBoostClassifier(
-        loss_function="Logloss",
-        eval_metric="Logloss",
-        iterations=args.iterations,
-        learning_rate=args.learning_rate,
-        depth=args.depth,
-        l2_leaf_reg=args.l2_leaf_reg,
-        random_strength=args.random_strength,
-        bootstrap_type="Bernoulli",
-        subsample=args.subsample,
-        rsm=args.rsm,
-        auto_class_weights="Balanced",
-        random_seed=args.seed,
-        thread_count=args.thread_count,
-        allow_writing_files=False,
-        verbose=args.verbose,
-    )
+    model_params = {
+        "loss_function": "Logloss",
+        "eval_metric": "Logloss",
+        "iterations": args.iterations,
+        "learning_rate": args.learning_rate,
+        "depth": args.depth,
+        "l2_leaf_reg": args.l2_leaf_reg,
+        "random_strength": args.random_strength,
+        "bootstrap_type": "Bernoulli",
+        "subsample": args.subsample,
+        "auto_class_weights": "Balanced",
+        "random_seed": args.seed,
+        "thread_count": args.thread_count,
+        "allow_writing_files": False,
+        "verbose": args.verbose,
+        "task_type": args.task_type,
+        "devices": args.devices,
+    }
+    if args.task_type == "CPU":
+        model_params["rsm"] = args.rsm
+    elif args.rsm != 1.0:
+        print("CatBoost GPU ignores rsm for Logloss; training without rsm.")
+
+    model = CatBoostClassifier(**model_params)
 
     train_pool = Pool(x_train, y_train, cat_features=CAT_FEATURES)
     valid_pool = Pool(x_valid, y_valid, cat_features=CAT_FEATURES)
@@ -380,6 +418,8 @@ def main() -> None:
 
     train_cmd = sub.add_parser("train", parents=[common])
     train_cmd.add_argument("--lexical-scores", default="outputs/lexical_scores.csv")
+    train_cmd.add_argument("--negatives", default="outputs/train_term_negatives.csv")
+    train_cmd.add_argument("--allow-submission-negatives", action="store_true")
     train_cmd.add_argument("--model", default="outputs/catboost_category_aware.cbm")
     train_cmd.add_argument("--n-pos", type=int, default=0)
     train_cmd.add_argument("--n-low", type=int, default=350_000)
@@ -398,6 +438,8 @@ def main() -> None:
     train_cmd.add_argument("--rsm", type=float, default=0.95)
     train_cmd.add_argument("--thread-count", type=int, default=-1)
     train_cmd.add_argument("--verbose", type=int, default=100)
+    train_cmd.add_argument("--task-type", choices=["CPU", "GPU"], default="CPU")
+    train_cmd.add_argument("--devices", default="0")
     train_cmd.add_argument("--seed", type=int, default=42)
     train_cmd.set_defaults(func=train)
 

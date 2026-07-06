@@ -1,0 +1,12 @@
+[{"stream_name":"stderr","time":7.565044138,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":7.565115071,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":7.565129365,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":7.565132483,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":8.187362414,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":8.187402954,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":8.187406984,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":8.187409904999999,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stdout","time":13.157625177,"data":"FULL_RUN=True USE_GPU=True OUTPUT_DIR=/kaggle/working\n"}
+,{"stream_name":"stdout","time":13.359553438,"data":"Data directory candidates:\n"}
+,{"stream_name":"stdout","time":13.359596656,"data":"  - /kaggle/input/competitions/trendyol-e-ticaret-yarismasi-2026-kaggle\n"}
+]
