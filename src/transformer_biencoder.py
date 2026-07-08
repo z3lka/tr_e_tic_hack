@@ -169,7 +169,12 @@ def make_pair_head_class(torch, nn):
 
 
 def mean_pool(model_output, attention_mask, F):
-    token_embeddings = model_output.last_hidden_state
+    if hasattr(model_output, "last_hidden_state"):
+        token_embeddings = model_output.last_hidden_state
+    elif isinstance(model_output, dict):
+        token_embeddings = model_output["last_hidden_state"]
+    else:
+        token_embeddings = model_output[0]
     expanded_mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     pooled = (token_embeddings * expanded_mask).sum(dim=1) / expanded_mask.sum(dim=1).clamp(min=1e-9)
     return F.normalize(pooled, p=2, dim=1)
@@ -181,8 +186,44 @@ def move_batch(batch: dict[str, Any], device: Any) -> dict[str, Any]:
 
 def choose_device(torch, requested: str):
     if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(requested)
+        if torch.cuda.is_available():
+            device_ids = list(range(torch.cuda.device_count()))
+            return torch.device(f"cuda:{device_ids[0]}"), device_ids
+        return torch.device("cpu"), []
+
+    if requested == "cpu":
+        return torch.device("cpu"), []
+
+    if requested.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"Requested {requested}, but CUDA is not available")
+        if requested == "cuda":
+            device_ids = list(range(torch.cuda.device_count()))
+        elif "," in requested:
+            device_ids = [int(value) for value in requested.replace("cuda:", "").split(",")]
+        else:
+            device_ids = [int(requested.split(":")[1])]
+
+        if not device_ids:
+            raise ValueError(f"No CUDA devices selected by --device {requested}")
+        max_device = torch.cuda.device_count() - 1
+        invalid = [device_id for device_id in device_ids if device_id < 0 or device_id > max_device]
+        if invalid:
+            raise ValueError(f"Invalid CUDA device ids {invalid}; available range is 0..{max_device}")
+        return torch.device(f"cuda:{device_ids[0]}"), device_ids
+
+    return torch.device(requested), []
+
+
+def maybe_wrap_data_parallel(torch, module: Any, device_ids: list[int], name: str):
+    if len(device_ids) > 1:
+        print(f"using DataParallel for {name} on cuda devices {device_ids}")
+        return torch.nn.DataParallel(module, device_ids=device_ids)
+    return module
+
+
+def unwrap_parallel(module: Any) -> Any:
+    return module.module if hasattr(module, "module") else module
 
 
 def train(args: argparse.Namespace) -> None:
@@ -191,7 +232,8 @@ def train(args: argparse.Namespace) -> None:
     data_dir = Path(args.data_dir)
     model_dir = Path(args.model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
-    device = choose_device(torch, args.device)
+    device, device_ids = choose_device(torch, args.device)
+    print(f"device={device} device_ids={device_ids}")
 
     frame = load_training_frame(args)
     required_terms = set(frame["term_id"].astype(str))
@@ -217,6 +259,8 @@ def train(args: argparse.Namespace) -> None:
     head = PairHead(embedding_dim=embedding_dim, hidden_dim=args.hidden_dim, dropout=args.dropout)
     encoder.to(device)
     head.to(device)
+    encoder = maybe_wrap_data_parallel(torch, encoder, device_ids, "encoder")
+    head = maybe_wrap_data_parallel(torch, head, device_ids, "head")
 
     class PairDataset(Dataset):
         def __init__(self, rows: pd.DataFrame):
@@ -356,9 +400,11 @@ def train(args: argparse.Namespace) -> None:
 def save_model(model_dir: Path, encoder: Any, tokenizer: Any, head: Any, args: argparse.Namespace, embedding_dim: int) -> None:
     import torch
 
-    encoder.save_pretrained(model_dir)
+    encoder_to_save = unwrap_parallel(encoder)
+    head_to_save = unwrap_parallel(head)
+    encoder_to_save.save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
-    torch.save(head.state_dict(), model_dir / "pair_head.pt")
+    torch.save(head_to_save.state_dict(), model_dir / "pair_head.pt")
     config = {
         "base_model": args.model_name,
         "embedding_dim": embedding_dim,
@@ -420,8 +466,11 @@ def predict(args: argparse.Namespace) -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch, _, _, _, _, _, _, _ = require_transformer_stack()
-    device = choose_device(torch, args.device)
+    device, device_ids = choose_device(torch, args.device)
+    print(f"device={device} device_ids={device_ids}")
     torch, F, tokenizer, encoder, head, config = load_model(model_dir, device)
+    encoder = maybe_wrap_data_parallel(torch, encoder, device_ids, "encoder")
+    head = maybe_wrap_data_parallel(torch, head, device_ids, "head")
 
     pairs_for_ids = pd.read_csv(
         data_dir / "submission_pairs.csv",
@@ -527,7 +576,7 @@ def main() -> None:
     train_cmd.add_argument("--max-item-length", type=int, default=192)
     train_cmd.add_argument("--item-chunksize", type=int, default=100_000)
     train_cmd.add_argument("--num-workers", type=int, default=0)
-    train_cmd.add_argument("--device", default="auto")
+    train_cmd.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, or cuda:0,1")
     train_cmd.add_argument("--fp16", action="store_true")
     train_cmd.add_argument("--seed", type=int, default=42)
     train_cmd.add_argument("--limit-pairs", type=int, default=0)
@@ -544,7 +593,7 @@ def main() -> None:
     pred_cmd.add_argument("--pair-chunksize", type=int, default=200_000)
     pred_cmd.add_argument("--item-chunksize", type=int, default=100_000)
     pred_cmd.add_argument("--embedding-dtype", choices=["float32", "float16"], default="float16")
-    pred_cmd.add_argument("--device", default="auto")
+    pred_cmd.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, or cuda:0,1")
     pred_cmd.add_argument("--limit-pairs", type=int, default=0)
     pred_cmd.set_defaults(func=predict)
 
