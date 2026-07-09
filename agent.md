@@ -1,6 +1,6 @@
 # Agent Notes
 
-Last updated: 2026-07-08
+Last updated: 2026-07-09
 
 ## What We Are Doing
 
@@ -43,6 +43,9 @@ Local competition data:
 - `src/pu_lgbm.py`: PU-style LightGBM classifier using lexical features and sampled negatives.
 - `src/train_term_negatives.py`: mines negatives from training terms and item catalog using TF-IDF similarity bands.
 - `src/pu_catboost.py`: category-aware CatBoost reranker using lexical features plus category-prior features.
+- `src/sample_negative_audit.py`: samples mined negatives by band/score bucket for manual or LLM audit without using LLM labels for training.
+- `src/transformer_biencoder.py`: Hugging Face transformer bi-encoder expert for term/item relevance, with cached term/item embeddings and multi-GPU Kaggle support.
+- `src/ensemble_scores.py`: two-level rank blend utility for CatBoost/LGBM GBDT scores plus transformer scores, and rate-based submission creation.
 - `notebooks/category_aware_pu_lgbm.ipynb`: main local experiment notebook with recorded public scores and full category-aware candidates.
 - `notebooks/catboost_gpu12000_2026-06-30.ipynb`: Kaggle-ready CatBoost GPU full-run notebook.
 - `notebooks/catboost_train_term_negatives_kaggle.ipynb`: Kaggle-ready CatBoost notebook that avoids submission-pair negative leakage by using train-term negatives.
@@ -89,15 +92,23 @@ Local competition data:
    - Columns: `term_id,item_id,negative_band,tfidf_score`.
    - Purpose: train on negatives mined from training terms and catalog items instead of sampling negatives from the test/submission candidate pool.
 
+7. Built and submitted the MoE-style GBDT + transformer rank blend on Kaggle.
+   - Negative samples stayed deterministic from the vector miner; LLM use is audit-only.
+   - Transformer bi-encoder checkpoint was saved as `transformer_biencoder.tar.gz` for session restarts.
+   - Transformer score file was saved/reused as `transformer_biencoder_scores.csv`.
+   - Final blend score file was saved/reused as `moe_gbdt_rankblend_scores.csv`.
+   - Best submitted result so far: `submission_moe_gbdt_rankblend_r26.csv`, public score `0.870`.
+
 ## What Worked
 
 - A simple lexical score was already competitive when the threshold produced about 20% positives.
   - Best lexical recorded result: `submission_lexical_t450.csv`, public score `0.76`.
 - PU LightGBM improved over lexical.
   - Best recorded result in the repo: `submission_pu_lgbm_v1_r20.csv`, public score `0.78`.
-- Positive rate around 18%-22% appears to be the useful range.
-  - The best recorded file uses exactly 20%.
+- Positive rate around 24%-26% is currently strongest for the MoE blend.
+  - Earlier models worked around 18%-22%, but the transformer/GBDT blend improved as rate increased.
 - Category priors and score blending were implemented successfully and produced full 3,359,679-row submission files.
+- The two-level rank blend gave the largest recorded jump so far, moving from the old `0.78`-`0.79` range to `0.870`.
 
 ## What Did Not Work Or Is Risky
 
@@ -111,8 +122,10 @@ Local competition data:
 - Older PU negative sampling used submission-pair candidates as unlabeled negatives.
   - This works pragmatically, but it is a leakage/robustness risk.
   - Newer scripts prefer `outputs/train_term_negatives.csv`; using submission negatives now requires explicit `--allow-submission-negatives`.
-- Category-aware, CatBoost, and blend candidates exist, but the repo does not record public scores for them.
-  - Do not assume they beat `0.78` until submitted.
+- Kaggle session restarts are expensive if cached artifacts are not saved.
+  - Save `moe_gbdt_rankblend_scores.csv`, `transformer_biencoder_scores.csv`, `transformer_biencoder.tar.gz`, and `train_term_negatives.csv` as reusable Kaggle dataset/cache artifacts.
+- Public leaderboard feedback is now strong, but it is still public-LB feedback.
+  - Keep changes controlled: rate sweeps, blend-weight sweeps, or seed averaging before major retraining changes.
 
 ## Key Submission Artifacts
 
@@ -125,6 +138,9 @@ Known scored files:
 | `outputs/submission_lexical_t450.csv` | 3,359,679 | 0.20307 | 0.76 | best lexical |
 | `outputs/submission_lexical_top20.csv` | 3,359,679 | 0.19160 | 0.54 | fixed per-query top-k weak |
 | `outputs/submission_pu_lgbm_v1_r20.csv` | 3,359,679 | 0.20000 | 0.78 | best recorded result |
+| `submission_moe_gbdt_rankblend_r22.csv` | 3,359,679 | 0.22000 | 0.854 | Kaggle MoE rank blend |
+| `submission_moe_gbdt_rankblend_r24.csv` | 3,359,679 | 0.24000 | 0.867 | Kaggle MoE rank blend |
+| `submission_moe_gbdt_rankblend_r26.csv` | 3,359,679 | 0.26000 | 0.870 | best recorded result |
 
 Unscored candidate files:
 
@@ -141,9 +157,10 @@ Unscored candidate files:
 
 ## Suggested Next Step
 
-When the Kaggle submission quota is available, submit one or two unscored candidates against the known `0.78` baseline. Start with:
+Reuse `moe_gbdt_rankblend_scores.csv` first before retraining. Generate rate sweeps around the current best:
 
-1. `outputs/category_aware_notebook/submission_category_aware_blend_r20.csv`
-2. `outputs/category_aware_notebook/submission_category_aware_blend_r22.csv`
+1. `r25`, `r26`, `r27`, and `r28` from the saved MoE score file.
+2. If quota allows, sweep transformer-heavy blend weights and test the best-looking rates around `0.26`.
+3. Only retrain the transformer after cheap score/rate/blend sweeps are exhausted.
 
-Keep `outputs/submission_pu_lgbm_v1_r20.csv` as the known-good baseline.
+Keep `submission_moe_gbdt_rankblend_r26.csv` as the known-good baseline.
