@@ -143,6 +143,80 @@ def load_training_frame(args: argparse.Namespace) -> pd.DataFrame:
     return frame
 
 
+def load_slate_training_split(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if args.fold < 0:
+        raise ValueError("--fold must be provided when --slates is used")
+
+    slates = pd.read_csv(args.slates, dtype=str, keep_default_na=False)
+    required = {"term_id", "item_id", "label", "fold"}
+    missing = required - set(slates.columns)
+    if missing:
+        raise ValueError(f"{args.slates} is missing columns: {sorted(missing)}")
+    if "slate_id" not in slates.columns:
+        slates["slate_id"] = [f"SLATE_{index:010d}" for index in range(len(slates))]
+
+    slates["fold"] = pd.to_numeric(slates["fold"], errors="raise").astype(np.int16)
+    slates["label"] = pd.to_numeric(slates["label"], errors="raise").astype(np.int8)
+    if not set(slates["label"].unique()).issubset({0, 1}):
+        raise ValueError(f"{args.slates} label values must be binary")
+    available_folds = sorted(slates["fold"].unique().tolist())
+    if args.fold not in available_folds:
+        raise ValueError(f"fold={args.fold} not present in {args.slates}; available={available_folds}")
+
+    if args.limit_terms:
+        term_ids = set(slates["term_id"].drop_duplicates().head(args.limit_terms).astype(str))
+        slates = slates.loc[slates["term_id"].isin(term_ids)]
+    if args.limit_items:
+        item_ids = load_first_item_ids(Path(args.data_dir), args.limit_items)
+        slates = slates.loc[slates["item_id"].isin(item_ids)]
+
+    train_frame = slates.loc[slates["fold"].ne(args.fold)].copy()
+    valid_frame = slates.loc[slates["fold"].eq(args.fold)].copy()
+    train_frame = sample_labeled_pairs(train_frame, args.limit_pairs, args.seed)
+    valid_frame = sample_labeled_pairs(valid_frame, args.max_valid_pairs, args.seed + 1)
+    train_frame = train_frame.sample(frac=1.0, random_state=args.seed + 2).reset_index(drop=True)
+    valid_frame = valid_frame.reset_index(drop=True)
+
+    if train_frame.empty or valid_frame.empty:
+        raise ValueError("Slate fold split produced an empty training or validation frame")
+    if train_frame["label"].nunique() != 2 or valid_frame["label"].nunique() != 2:
+        raise ValueError("Slate training and validation frames must both contain labels 0 and 1")
+    overlap = set(train_frame["term_id"].astype(str)) & set(valid_frame["term_id"].astype(str))
+    if overlap:
+        examples = sorted(overlap)[:5]
+        raise AssertionError(f"Term leakage across slate split, examples={examples}")
+
+    print(
+        f"slate_fold={args.fold} train_rows={len(train_frame):,} valid_rows={len(valid_frame):,} "
+        f"train_terms={train_frame['term_id'].nunique():,} valid_terms={valid_frame['term_id'].nunique():,}"
+    )
+    return train_frame, valid_frame
+
+
+def split_inner_validation_by_term(
+    frame: pd.DataFrame,
+    valid_size: float,
+    seed: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not 0.0 < valid_size < 1.0:
+        raise ValueError(f"--inner-valid-size must be between 0 and 1, got {valid_size}")
+    term_ids = frame["term_id"].drop_duplicates().astype(str).to_numpy()
+    if len(term_ids) < 2:
+        raise ValueError("Need at least two outer-training terms for inner early stopping")
+    rng = np.random.default_rng(seed)
+    rng.shuffle(term_ids)
+    n_valid_terms = min(len(term_ids) - 1, max(1, int(round(len(term_ids) * valid_size))))
+    valid_term_ids = set(term_ids[:n_valid_terms])
+    inner_valid = frame.loc[frame["term_id"].isin(valid_term_ids)].copy().reset_index(drop=True)
+    inner_train = frame.loc[~frame["term_id"].isin(valid_term_ids)].copy().reset_index(drop=True)
+    overlap = set(inner_train["term_id"].astype(str)) & set(inner_valid["term_id"].astype(str))
+    if overlap:
+        raise AssertionError("Term leakage across transformer inner validation split")
+    if inner_train["label"].nunique() != 2 or inner_valid["label"].nunique() != 2:
+        raise ValueError("Transformer inner training and validation frames must contain labels 0 and 1")
+    return inner_train, inner_valid
+
+
 def make_pair_head_class(torch, nn):
     class PairHead(nn.Module):
         def __init__(self, embedding_dim: int, hidden_dim: int, dropout: float):
@@ -235,7 +309,28 @@ def train(args: argparse.Namespace) -> None:
     device, device_ids = choose_device(torch, args.device)
     print(f"device={device} device_ids={device_ids}")
 
-    frame = load_training_frame(args)
+    if args.slates:
+        outer_train_frame, score_frame = load_slate_training_split(args)
+        train_frame, valid_frame = split_inner_validation_by_term(
+            outer_train_frame,
+            args.inner_valid_size,
+            args.seed + args.fold * 100,
+        )
+        frame = pd.concat([train_frame, valid_frame, score_frame], ignore_index=True)
+        print(
+            f"transformer model_fit_rows={len(train_frame):,} "
+            f"inner_early_stop_rows={len(valid_frame):,} outer_score_rows={len(score_frame):,}"
+        )
+    else:
+        frame = load_training_frame(args)
+        rng = np.random.default_rng(args.seed)
+        valid_mask = rng.random(len(frame)) < args.valid_size
+        if valid_mask.all() or (~valid_mask).all():
+            raise ValueError("Validation split produced an empty train or validation set")
+        train_frame = frame.loc[~valid_mask].reset_index(drop=True)
+        valid_frame = frame.loc[valid_mask].reset_index(drop=True)
+        score_frame = valid_frame
+
     required_terms = set(frame["term_id"].astype(str))
     required_items = set(frame["item_id"].astype(str))
     term_texts = load_terms_texts(data_dir, required_terms)
@@ -244,13 +339,6 @@ def train(args: argparse.Namespace) -> None:
     missing_items = required_items - set(item_texts)
     if missing_terms or missing_items:
         raise KeyError(f"missing_terms={len(missing_terms)} missing_items={len(missing_items)}")
-
-    rng = np.random.default_rng(args.seed)
-    valid_mask = rng.random(len(frame)) < args.valid_size
-    if valid_mask.all() or (~valid_mask).all():
-        raise ValueError("Validation split produced an empty train or validation set")
-    train_frame = frame.loc[~valid_mask].reset_index(drop=True)
-    valid_frame = frame.loc[valid_mask].reset_index(drop=True)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     encoder = AutoModel.from_pretrained(args.model_name)
@@ -310,6 +398,14 @@ def train(args: argparse.Namespace) -> None:
         collate_fn=collate,
         pin_memory=device.type == "cuda",
     )
+    score_loader = DataLoader(
+        PairDataset(score_frame),
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate,
+        pin_memory=device.type == "cuda",
+    )
 
     no_decay = ["bias", "LayerNorm.weight"]
     grouped_params = [
@@ -337,11 +433,12 @@ def train(args: argparse.Namespace) -> None:
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([neg_count / max(1, pos_count)], device=device))
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16 and device.type == "cuda")
 
-    def run_eval() -> float:
+    def run_eval() -> tuple[float, np.ndarray]:
         encoder.eval()
         head.eval()
         total_loss = 0.0
         total_rows = 0
+        probability_parts: list[np.ndarray] = []
         with torch.no_grad():
             for query_batch, item_batch, labels in tqdm(valid_loader, desc="valid", leave=False):
                 query_batch = move_batch(query_batch, device)
@@ -353,9 +450,27 @@ def train(args: argparse.Namespace) -> None:
                 loss = criterion(logits, labels)
                 total_loss += float(loss.detach().cpu()) * len(labels)
                 total_rows += len(labels)
-        return total_loss / max(1, total_rows)
+                probability_parts.append(torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32))
+        probabilities = np.concatenate(probability_parts) if probability_parts else np.empty(0, dtype=np.float32)
+        return total_loss / max(1, total_rows), probabilities
+
+    def predict_loader(loader: Any, desc: str) -> np.ndarray:
+        encoder.eval()
+        head.eval()
+        probability_parts: list[np.ndarray] = []
+        with torch.no_grad():
+            for query_batch, item_batch, _ in tqdm(loader, desc=desc, leave=False):
+                query_batch = move_batch(query_batch, device)
+                item_batch = move_batch(item_batch, device)
+                q_emb = mean_pool(encoder(**query_batch), query_batch["attention_mask"], F)
+                i_emb = mean_pool(encoder(**item_batch), item_batch["attention_mask"], F)
+                logits = head(q_emb, i_emb)
+                probability_parts.append(torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32))
+        return np.concatenate(probability_parts) if probability_parts else np.empty(0, dtype=np.float32)
 
     best_valid = float("inf")
+    best_valid_probability: np.ndarray | None = None
+    best_epoch = 0
     for epoch in range(1, args.epochs + 1):
         encoder.train()
         head.train()
@@ -385,15 +500,47 @@ def train(args: argparse.Namespace) -> None:
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
-        valid_loss = run_eval()
+        valid_loss, valid_probability = run_eval()
         train_loss = running_loss / max(1, running_rows)
         print(f"epoch={epoch} train_loss={train_loss:.6f} valid_loss={valid_loss:.6f}")
         if valid_loss < best_valid:
             best_valid = valid_loss
+            best_valid_probability = valid_probability.copy()
+            best_epoch = epoch
             save_model(model_dir, encoder, tokenizer, head, args, embedding_dim)
             print(f"saved best model to {model_dir}")
 
     print(f"best_valid_loss={best_valid:.6f}")
+    print(f"best_epoch={best_epoch}")
+    if args.valid_output:
+        if args.slates:
+            del encoder, head, optimizer, scheduler, scaler, criterion, grouped_params
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            torch, F, tokenizer, encoder, head, _ = load_model(model_dir, device)
+            encoder = maybe_wrap_data_parallel(torch, encoder, device_ids, "encoder")
+            head = maybe_wrap_data_parallel(torch, head, device_ids, "head")
+            output_probability = predict_loader(score_loader, "outer OOF score")
+        else:
+            if best_valid_probability is None:
+                raise RuntimeError("Best validation probabilities were not captured correctly")
+            output_probability = best_valid_probability
+        if len(output_probability) != len(score_frame):
+            raise RuntimeError("Best-checkpoint output probabilities do not align with the score frame")
+        valid_output_path = Path(args.valid_output)
+        valid_output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_columns = ["slate_id"] if "slate_id" in score_frame.columns else []
+        if not output_columns:
+            output_columns = [
+                column
+                for column in ["term_id", "item_id", "label"]
+                if column in score_frame.columns
+            ]
+        valid_output = score_frame[output_columns].copy()
+        valid_output["transformer_prob"] = output_probability
+        valid_output.to_csv(valid_output_path, index=False)
+        print(f"wrote {valid_output_path} rows={len(valid_output):,}")
     print(f"elapsed_minutes={(time.time() - start_time) / 60:.1f}")
 
 
@@ -559,6 +706,12 @@ def main() -> None:
     train_cmd = sub.add_parser("train")
     train_cmd.add_argument("--data-dir", default="data")
     train_cmd.add_argument("--negatives", default="outputs/train_term_negatives.csv")
+    train_cmd.add_argument(
+        "--slates",
+        help="Grouped OOF validation slate CSV. When set, --fold selects held-out terms.",
+    )
+    train_cmd.add_argument("--fold", type=int, default=-1)
+    train_cmd.add_argument("--valid-output", help="Write best-epoch held-out probabilities to this CSV.")
     train_cmd.add_argument("--model-dir", default="outputs/transformer_biencoder")
     train_cmd.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     train_cmd.add_argument("--epochs", type=int, default=2)
@@ -572,6 +725,12 @@ def main() -> None:
     train_cmd.add_argument("--hidden-dim", type=int, default=256)
     train_cmd.add_argument("--dropout", type=float, default=0.1)
     train_cmd.add_argument("--valid-size", type=float, default=0.05)
+    train_cmd.add_argument(
+        "--inner-valid-size",
+        type=float,
+        default=0.10,
+        help="With --slates, reserve this fraction of outer-training terms for checkpoint selection.",
+    )
     train_cmd.add_argument("--max-query-length", type=int, default=48)
     train_cmd.add_argument("--max-item-length", type=int, default=192)
     train_cmd.add_argument("--item-chunksize", type=int, default=100_000)
@@ -580,6 +739,7 @@ def main() -> None:
     train_cmd.add_argument("--fp16", action="store_true")
     train_cmd.add_argument("--seed", type=int, default=42)
     train_cmd.add_argument("--limit-pairs", type=int, default=0)
+    train_cmd.add_argument("--max-valid-pairs", type=int, default=0)
     train_cmd.add_argument("--limit-terms", type=int, default=0)
     train_cmd.add_argument("--limit-items", type=int, default=0)
     train_cmd.set_defaults(func=train)

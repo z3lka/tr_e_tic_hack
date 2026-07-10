@@ -1,6 +1,6 @@
 # Agent Notes
 
-Last updated: 2026-07-09
+Last updated: 2026-07-10
 
 ## What We Are Doing
 
@@ -46,10 +46,15 @@ Local competition data:
 - `src/sample_negative_audit.py`: samples mined negatives by band/score bucket for manual or LLM audit without using LLM labels for training.
 - `src/transformer_biencoder.py`: Hugging Face transformer bi-encoder expert for term/item relevance, with cached term/item embeddings and multi-GPU Kaggle support.
 - `src/ensemble_scores.py`: two-level rank blend utility for CatBoost/LGBM GBDT scores plus transformer scores, and rate-based submission creation.
+- `src/category_signal.py`: reusable query-to-category TF-IDF/SGD prior model extracted from the category-aware notebook.
+- `src/grouped_oof_validation.py`: leakage-safe grouped OOF pipeline that builds top-100-plus-positive slates, trains fold-specific category priors and GBDTs, combines optional transformer scores, and optimizes Macro-F1.
+- `docs/grouped_oof_validation.md`: full and debug commands for the grouped five-fold workflow.
 - `notebooks/category_aware_pu_lgbm.ipynb`: main local experiment notebook with recorded public scores and full category-aware candidates.
 - `notebooks/catboost_gpu12000_2026-06-30.ipynb`: Kaggle-ready CatBoost GPU full-run notebook.
 - `notebooks/catboost_train_term_negatives_kaggle.ipynb`: Kaggle-ready CatBoost notebook that avoids submission-pair negative leakage by using train-term negatives.
 - `notebooks/vector_space_negatives_catboost_kaggle.ipynb`: self-contained Kaggle notebook using vector-space negative mining and CatBoost.
+- `notebooks/grouped_5fold_oof_kaggle.ipynb`: standalone Kaggle GPU notebook with embedded source modules for the full grouped OOF workflow and resumable fold/cache controls.
+- `scripts/build_grouped_oof_kaggle_notebook.py`: regenerates the standalone grouped OOF notebook from the current `src/` modules.
 - `notebooks/from_zero_sub.ipynb`, `notebooks/playground.ipynb`: exploratory notebooks.
 
 ## What Has Been Done
@@ -98,6 +103,13 @@ Local competition data:
    - Transformer score file was saved/reused as `transformer_biencoder_scores.csv`.
    - Final blend score file was saved/reused as `moe_gbdt_rankblend_scores.csv`.
    - Best submitted result so far: `submission_moe_gbdt_rankblend_r26.csv`, public score `0.870`.
+
+8. Implemented term-grouped five-fold candidate-slate validation.
+   - Folds are assigned by `term_id`, matching the disjoint training/test query structure.
+   - Each validation slate is an unsupervised top-100 catalog retrieval unioned with all known positives.
+   - Fold-specific category priors and models never use outer held-out labels.
+   - A separate inner term split handles early stopping; the outer fold is scoring-only.
+   - CatBoost, LightGBM, optional transformer OOF scores, blend weights, positive rates, and the base-100 constraint share one optimizer.
 
 ## What Worked
 
