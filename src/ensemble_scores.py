@@ -130,15 +130,66 @@ def rate_suffix(rate: float) -> str:
     return f"r{int(round(rate * 100)):02d}"
 
 
-def make_prediction(scores: pd.Series, rate: float) -> np.ndarray:
+def make_prediction(
+    scores: pd.Series,
+    rate: float,
+    term_ids: pd.Series | None = None,
+    min_positive_excess_base: int = 0,
+) -> np.ndarray:
     if not 0.0 < rate < 1.0:
         raise ValueError(f"rate must be between 0 and 1, got {rate}")
     n_pos = int(round(len(scores) * rate))
     prediction = np.zeros(len(scores), dtype=np.int8)
     if n_pos <= 0:
         return prediction
-    selected = scores.nlargest(n_pos).index
-    prediction[selected] = 1
+
+    if min_positive_excess_base <= 0:
+        selected = scores.nlargest(n_pos).index
+        prediction[selected] = 1
+        return prediction
+
+    if term_ids is None:
+        raise ValueError("term_ids are required when min_positive_excess_base is enabled")
+    if len(term_ids) != len(scores):
+        raise ValueError("term_ids and scores must have the same number of rows")
+
+    # The competition candidate set appears to contain a base retrieval slate of
+    # 100 items per term, unioned with known positives that retrieval missed.  If
+    # that inference is correct, a term with N candidates has at least N - 100
+    # positives.  Protect the highest-scoring rows needed to satisfy that lower
+    # bound, then spend the remaining global positive budget normally.
+    frame = pd.DataFrame(
+        {
+            "term_id": term_ids.astype(str).to_numpy(),
+            "score": scores.to_numpy(dtype=np.float64),
+        }
+    )
+    group_size = frame.groupby("term_id", sort=False)["score"].transform("size")
+    minimum = (group_size - min_positive_excess_base).clip(lower=0)
+    within_term_rank = frame.groupby("term_id", sort=False)["score"].rank(
+        method="first",
+        ascending=False,
+    )
+    mandatory = within_term_rank.le(minimum).to_numpy()
+    n_mandatory = int(mandatory.sum())
+    if n_mandatory > n_pos:
+        minimum_rate = n_mandatory / len(scores)
+        raise ValueError(
+            "Requested positive rate is too small for the per-term lower bounds: "
+            f"mandatory={n_mandatory:,} budget={n_pos:,} minimum_rate={minimum_rate:.6f}"
+        )
+
+    prediction[mandatory] = 1
+    remaining = n_pos - n_mandatory
+    if remaining:
+        eligible_positions = np.flatnonzero(~mandatory)
+        eligible_scores = frame.loc[~mandatory, "score"].to_numpy()
+        if remaining >= len(eligible_positions):
+            selected_positions = eligible_positions
+        else:
+            selected_local = np.argpartition(eligible_scores, -remaining)[-remaining:]
+            selected_positions = eligible_positions[selected_local]
+        prediction[selected_positions] = 1
     return prediction
 
 
@@ -153,11 +204,19 @@ def submit(args: argparse.Namespace) -> None:
         raise ValueError(f"{args.scores} contains null/non-numeric values in {column}")
 
     for rate in args.rates:
-        prediction = make_prediction(scores[column], rate)
+        prediction = make_prediction(
+            scores[column],
+            rate,
+            term_ids=scores["term_id"] if "term_id" in scores.columns else None,
+            min_positive_excess_base=args.min_positive_excess_base,
+        )
         output = pd.DataFrame({"id": scores["id"], "prediction": prediction})
         output_path = output_dir / f"{args.prefix}_{rate_suffix(rate)}.csv"
         output.to_csv(output_path, index=False)
-        print(f"{output_path}: rows={len(output):,} positives={int(prediction.sum()):,} rate={prediction.mean():.5f}")
+        print(
+            f"{output_path}: rows={len(output):,} positives={int(prediction.sum()):,} "
+            f"rate={prediction.mean():.5f} min_positive_excess_base={args.min_positive_excess_base}"
+        )
 
 
 def main() -> None:
@@ -185,6 +244,16 @@ def main() -> None:
     submit_cmd.add_argument("--prefix", default="submission_moe_gbdt_rankblend")
     submit_cmd.add_argument("--rates", type=float, nargs="+", default=[0.18, 0.20, 0.22, 0.24])
     submit_cmd.add_argument("--score-col")
+    submit_cmd.add_argument(
+        "--min-positive-excess-base",
+        type=int,
+        default=0,
+        help=(
+            "Opt-in per-term constraint: require at least max(candidate_count - BASE, 0) "
+            "positives per term before filling the remaining global rate budget. "
+            "Use 100 to test the inferred base-100 candidate construction."
+        ),
+    )
     submit_cmd.add_argument("--limit-rows", type=int, default=0)
     submit_cmd.set_defaults(func=submit)
 
