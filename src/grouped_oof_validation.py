@@ -42,6 +42,7 @@ SLATE_COLUMNS = [
     "retrieval_rank",
     "retrieval_score",
 ]
+OPTIONAL_SEMANTIC_FEATURES = ["semantic_cosine", "semantic_rank_pct"]
 
 
 def load_positive_pairs(path: Path) -> pd.DataFrame:
@@ -386,6 +387,9 @@ def train_lgbm(
     args: argparse.Namespace,
 ) -> tuple[lgb.LGBMClassifier, np.ndarray]:
     numeric_features = BASE_FEATURE_NAMES + CATEGORY_FEATURE_NAMES
+    numeric_features.extend(
+        feature for feature in OPTIONAL_SEMANTIC_FEATURES if feature in x_fit.columns
+    )
     model = lgb.LGBMClassifier(
         objective="binary",
         n_estimators=args.lgbm_estimators,
@@ -495,6 +499,18 @@ def run_fold(args: argparse.Namespace, fold: int | None = None) -> Path:
         item_meta_lookup,
         f"fold {selected_fold} valid features",
     )
+    semantic_features: list[str] = []
+    if args.semantic_features:
+        semantic_features = [
+            feature
+            for feature in OPTIONAL_SEMANTIC_FEATURES
+            if feature in train_rows.columns and feature in valid_rows.columns
+        ]
+        for feature in semantic_features:
+            x_train[feature] = pd.to_numeric(train_rows[feature], errors="raise").to_numpy(dtype=np.float32)
+            x_valid[feature] = pd.to_numeric(valid_rows[feature], errors="raise").to_numpy(dtype=np.float32)
+        if not semantic_features:
+            print("semantic features requested, but the slate contains none")
     y_train = train_rows["label"].to_numpy(dtype=np.int8)
     y_valid = valid_rows["label"].to_numpy(dtype=np.int8)
     fit_index, inner_valid_index = inner_group_split(
@@ -517,6 +533,8 @@ def run_fold(args: argparse.Namespace, fold: int | None = None) -> Path:
 
     score_output = valid_rows[SLATE_COLUMNS].copy().reset_index(drop=True)
     score_output["lexical_score"] = x_valid["lexical_score"].to_numpy(dtype=np.float32)
+    for feature in semantic_features:
+        score_output[feature] = x_valid[feature].to_numpy(dtype=np.float32)
     models = set(args.models)
     if "catboost" in models:
         _, catboost_probability = train_catboost(
@@ -552,6 +570,7 @@ def run_fold(args: argparse.Namespace, fold: int | None = None) -> Path:
         "valid_terms": valid_rows["term_id"].nunique(),
         "model_fit_rows": len(fit_index),
         "inner_early_stop_rows": len(inner_valid_index),
+        "semantic_features": semantic_features,
         "train_positive_rate": float(y_train.mean()),
         "valid_positive_rate": float(y_valid.mean()),
         "elapsed_minutes": (time.time() - started) / 60.0,
@@ -693,7 +712,14 @@ def optimize(args: argparse.Namespace) -> None:
     if args.components:
         components = args.components
     else:
-        preferred = ["catboost_prob", "lgbm_prob", "transformer_prob", "lexical_score"]
+        preferred = [
+            "catboost_prob",
+            "lgbm_prob",
+            "transformer_prob",
+            "semantic_cosine",
+            "semantic_rank_pct",
+            "lexical_score",
+        ]
         components = [column for column in preferred if column in frame.columns]
     if not components:
         raise ValueError("No score components were found; pass --components explicitly")
@@ -800,6 +826,12 @@ def add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lgbm-colsample-bytree", type=float, default=0.9)
     parser.add_argument("--lgbm-reg-lambda", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--semantic-features",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use semantic_cosine/semantic_rank_pct when those optional columns exist in the slate.",
+    )
 
 
 def main() -> None:
