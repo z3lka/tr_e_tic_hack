@@ -1,19 +1,50 @@
-# Python virtual environments
-venc/
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.kaggle/
+kaggle.json
+
+# Python environments and caches
+.venv/
 .venc/
+venv/
 env/
-
-data
-
-outputs/
-
-# Python cache
 __pycache__/
-*.pyc
-*.csv
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
 
 # Jupyter
 .ipynb_checkpoints/
 
-# Environment variables
-.env
+# Competition data, trained models, logs, and generated submissions
+data/
+outputs/
+kaggle_outputs/
+*.csv
+*.joblib
+*.cbm
+*.npy
+*.npz
+*.pt
+*.pth
+*.safetensors
+*.tar.gz
+*.log

@@ -1,4 +1,4 @@
-# Agent Notes
+# Project Notes
 
 Last updated: 2026-07-10
 
@@ -14,16 +14,15 @@ Important problem details:
 - A useful solution needs good negative sampling, because true negative labels are not provided in training.
 - The practical target is to rank each `term_id` / `item_id` pair and write an `id,prediction` submission file.
 
-## Competition Links And Paths
+## Competition Links And Runtime Paths
 
 - Kaggle competition URL: https://www.kaggle.com/competitions/trendyol-e-ticaret-yarismasi-2026-kaggle
 - Kaggle competition input path: `/kaggle/input/competitions/trendyol-e-ticaret-yarismasi-2026-kaggle`
 - Kaggle working output path: `/kaggle/working`
-- Local repo path: `/Users/z3lka/trendyol_e_ticaret_hack`
-- Local data path: `/Users/z3lka/trendyol_e_ticaret_hack/data`
-- Local outputs path: `/Users/z3lka/trendyol_e_ticaret_hack/outputs`
-- Local competition PDF: `/Users/z3lka/trendyol_e_ticaret_hack/E-TİCARET_T_NFSoo.pdf`
-- Kaggle run log with detected input path: `/Users/z3lka/trendyol_e_ticaret_hack/kaggle_outputs/negative-sampling.log`
+- Local data path: `data/`
+- Local outputs path: `outputs/`
+- Competition PDF: `docs/competition-specification.pdf`
+- Local Kaggle run logs: `kaggle_outputs/` (not tracked)
 
 ## Data
 
