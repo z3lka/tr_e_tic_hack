@@ -36,12 +36,7 @@ def code(source: str) -> dict[str, object]:
 
 def module_cell(filename: str) -> dict[str, object]:
     source = (ROOT / "src" / filename).read_text(encoding="utf-8")
-    return code(
-        f'''module_path = SRC_DIR / {filename!r}
-module_path.write_text({source!r}, encoding="utf-8")
-print(f"wrote {{module_path}} ({{module_path.stat().st_size:,}} bytes)")
-'''
-    )
+    return code(f"%%writefile src/{filename}\n{source}")
 
 
 cells: list[dict[str, object]] = [
@@ -109,6 +104,7 @@ CACHE_DIR = ROOT_OUT / "frozen_cache"
 RUN_DIR = ROOT_OUT / MODE
 SRC_DIR.mkdir(parents=True, exist_ok=True)
 RUN_DIR.mkdir(parents=True, exist_ok=True)
+os.chdir(WORK_DIR)
 
 data_candidates = [
     Path("/kaggle/input/competitions/trendyol-e-ticaret-yarismasi-2026-kaggle"),
