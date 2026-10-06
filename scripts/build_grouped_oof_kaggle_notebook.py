@@ -1,8 +1,9 @@
+"""Generate the self-contained Kaggle notebook for grouped OOF validation."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "notebooks" / "grouped_5fold_oof_kaggle.ipynb"
@@ -18,6 +19,8 @@ MODULES = [
 
 
 def markdown(source: str) -> dict[str, object]:
+    """Create a markdown cell from a plain string."""
+
     return {
         "cell_type": "markdown",
         "metadata": {},
@@ -26,6 +29,8 @@ def markdown(source: str) -> dict[str, object]:
 
 
 def code(source: str) -> dict[str, object]:
+    """Create an unexecuted code cell from Python source."""
+
     return {
         "cell_type": "code",
         "execution_count": None,
@@ -36,28 +41,33 @@ def code(source: str) -> dict[str, object]:
 
 
 def module_cell(filename: str) -> dict[str, object]:
+    """Embed one repository module as a Kaggle writefile cell."""
+
     module_source = (ROOT / "src" / filename).read_text(encoding="utf-8")
     source = f"%%writefile src/{filename}\n{module_source}"
     return code(source)
 
 
 cells: list[dict[str, object]] = [
-    markdown(
-        """# Trendyol term-grouped 5-fold OOF validation
+    markdown("""# Trendyol term-grouped 5-fold OOF validation
 
-This notebook is self-contained: it writes all required repository modules into `/kaggle/working/src`. It builds candidate slates, trains leakage-safe CatBoost/LightGBM folds, optionally trains transformer folds, combines OOF scores, and optimizes Macro-F1 blend/rate/count constraints.
+This notebook is self-contained: it writes all required repository modules into
+`/kaggle/working/src`. It builds candidate slates, trains leakage-safe
+CatBoost/LightGBM folds, optionally trains transformer folds, combines OOF scores,
+and optimizes Macro-F1 blend/rate/count constraints.
 
 Recommended Kaggle workflow:
 
 1. For a one-session attempt, use `STAGE = \"all\"` and all five folds.
-2. If the session is too short, first run `STAGE = \"build\"`, save `/kaggle/working/grouped_oof` as a Kaggle dataset, attach it next session, set `CACHE_ROOT`, and run one or two folds at a time with `STAGE = \"folds\"`.
+2. If the session is too short, first run `STAGE = \"build\"`, save
+   `/kaggle/working/grouped_oof` as a Kaggle dataset, attach it next session, set
+   `CACHE_ROOT`, and run one or two folds at a time with `STAGE = \"folds\"`.
 3. After all fold artifacts are cached, use `STAGE = \"optimize\"`.
 
-For leakage-safe transformer OOF training, `BASE_MODEL` must be the original pretrained encoder, not your previous full-data fine-tuned `bi-encoder` checkpoint.
-"""
-    ),
-    code(
-        '''from pathlib import Path
+For leakage-safe transformer OOF training, `BASE_MODEL` must be the original
+pretrained encoder, not your previous full-data fine-tuned `bi-encoder` checkpoint.
+"""),
+    code("""from pathlib import Path
 import os
 import shutil
 import subprocess
@@ -118,7 +128,9 @@ if DATA_DIR is None:
     if len(matches) == 1:
         DATA_DIR = matches[0].parent
     else:
-        raise FileNotFoundError(f"Could not uniquely locate competition data; matches={matches[:10]}")
+        raise FileNotFoundError(
+            f"Could not uniquely locate competition data; matches={matches[:10]}"
+        )
 
 if CACHE_ROOT is not None:
     CACHE_ROOT = Path(CACHE_ROOT)
@@ -130,11 +142,9 @@ if CACHE_ROOT is not None:
 print(f"STAGE={STAGE} FOLDS_TO_RUN={FOLDS_TO_RUN}")
 print(f"DATA_DIR={DATA_DIR}")
 print(f"OUT_DIR={OUT_DIR}")
-'''
-    ),
+"""),
     markdown("## Install/check runtime dependencies"),
-    code(
-        '''import importlib.util
+    code("""import importlib.util
 
 required_packages = {
     "rapidfuzz": "rapidfuzz",
@@ -146,14 +156,17 @@ required_packages = {
 if RUN_TRANSFORMER:
     required_packages.update({"torch": "torch", "transformers": "transformers"})
 
-missing_packages = [pip_name for module, pip_name in required_packages.items() if importlib.util.find_spec(module) is None]
+missing_packages = [
+    pip_name
+    for module, pip_name in required_packages.items()
+    if importlib.util.find_spec(module) is None
+]
 if missing_packages:
     print("installing", missing_packages)
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", *missing_packages], check=True)
 else:
     print("all dependencies are already available")
-'''
-    ),
+"""),
     markdown("## Write embedded source modules"),
 ]
 
@@ -162,8 +175,7 @@ for module in MODULES:
 
 cells.extend(
     [
-        code(
-            '''sys.path.insert(0, str(SRC_DIR))
+        code("""sys.path.insert(0, str(SRC_DIR))
 env = os.environ.copy()
 env["PYTHONPATH"] = str(SRC_DIR)
 env.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -175,11 +187,9 @@ def run_command(arguments):
 
 run_command([SRC_DIR / "grouped_oof_validation.py", "--help"])
 print("embedded source import check passed")
-'''
-        ),
+"""),
         markdown("## Stage 1 — build five-fold candidate slates"),
-        code(
-            '''slate_path = OUT_DIR / "validation_slates.csv"
+        code("""slate_path = OUT_DIR / "validation_slates.csv"
 should_build = STAGE in {"build", "all"}
 if should_build and (not SKIP_EXISTING or not slate_path.exists()):
     run_command([
@@ -204,10 +214,8 @@ if STAGE in {"folds", "optimize"} and not slate_path.exists():
     raise FileNotFoundError(
         f"{slate_path} is required. Run STAGE='build' first or set CACHE_ROOT to a saved cache."
     )
-'''
-        ),
-        code(
-            '''import json
+"""),
+        code("""import json
 import pandas as pd
 
 if (OUT_DIR / "slate_summary.json").exists():
@@ -215,11 +223,9 @@ if (OUT_DIR / "slate_summary.json").exists():
 if slate_path.exists():
     slate_preview = pd.read_csv(slate_path, nrows=5)
     display(slate_preview)
-'''
-        ),
+"""),
         markdown("## Stage 2 — fold-specific CatBoost and LightGBM"),
-        code(
-            '''should_run_folds = STAGE in {"folds", "all"}
+        code("""should_run_folds = STAGE in {"folds", "all"}
 models = []
 if RUN_CATBOOST:
     models.append("catboost")
@@ -254,11 +260,9 @@ elif not should_run_folds:
     print("GBDT fold stage disabled")
 else:
     print("No GBDT models selected")
-'''
-        ),
+"""),
         markdown("## Stage 3 — optional transformer folds"),
-        code(
-            '''if should_run_folds and RUN_TRANSFORMER:
+        code("""if should_run_folds and RUN_TRANSFORMER:
     for fold in FOLDS_TO_RUN:
         fold_dir = OUT_DIR / f"fold_{fold}"
         transformer_score_path = fold_dir / "transformer_oof_scores.csv"
@@ -287,11 +291,12 @@ elif not should_run_folds:
     print("transformer fold stage disabled")
 else:
     print("RUN_TRANSFORMER=False; skipping transformer folds")
-'''
-        ),
+"""),
         markdown("## Combine completed OOF folds"),
-        code(
-            '''gbdt_fold_paths = [OUT_DIR / f"fold_{fold}" / "oof_scores.csv" for fold in range(N_SPLITS)]
+        code("""gbdt_fold_paths = [
+    OUT_DIR / f"fold_{fold}" / "oof_scores.csv"
+    for fold in range(N_SPLITS)
+]
 all_gbdt_folds_ready = all(path.exists() for path in gbdt_fold_paths)
 if all_gbdt_folds_ready:
     run_command([
@@ -304,11 +309,9 @@ else:
     missing = [str(path) for path in gbdt_fold_paths if not path.exists()]
     print("OOF combine waits for all five GBDT folds. Missing:")
     print("\\n".join(missing))
-'''
-        ),
+"""),
         markdown("## Stage 4 — optimize Macro-F1 blend, rate, and constraint"),
-        code(
-            '''combined_oof_path = OUT_DIR / "oof_scores.csv"
+        code("""combined_oof_path = OUT_DIR / "oof_scores.csv"
 should_optimize = STAGE in {"optimize", "all"}
 if should_optimize and combined_oof_path.exists():
     transformer_fold_paths = [
@@ -339,18 +342,14 @@ elif should_optimize:
     print(f"cannot optimize until {combined_oof_path} exists")
 else:
     print("optimization stage disabled")
-'''
-        ),
-        code(
-            '''if (OUT_DIR / "oof_best.json").exists():
+"""),
+        code("""if (OUT_DIR / "oof_best.json").exists():
     print((OUT_DIR / "oof_best.json").read_text())
 if (OUT_DIR / "oof_optimization.csv").exists():
     display(pd.read_csv(OUT_DIR / "oof_optimization.csv").head(30))
-'''
-        ),
+"""),
         markdown("## Package outputs for the next Kaggle session"),
-        code(
-            '''if PACKAGE_CACHE:
+        code("""if PACKAGE_CACHE:
     archive_base = WORK_DIR / "grouped_oof_cache"
     archive_path = shutil.make_archive(
         str(archive_base),
@@ -364,10 +363,12 @@ print("\\nAvailable artifacts:")
 for path in sorted(OUT_DIR.glob("**/*")):
     if path.is_file():
         print(f"{path.relative_to(OUT_DIR)}  {path.stat().st_size / 1024**2:.1f} MiB")
-'''
-        ),
+"""),
     ]
 )
+
+for index, cell in enumerate(cells):
+    cell["id"] = f"grouped-oof-{index:03d}"
 
 notebook = {
     "cells": cells,

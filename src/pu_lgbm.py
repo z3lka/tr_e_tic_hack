@@ -1,3 +1,5 @@
+"""Train and score a lexical positive-unlabeled LightGBM model."""
+
 from __future__ import annotations
 
 import argparse
@@ -13,7 +15,6 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 from lexical_baseline import load_items, load_terms, pair_features
-
 
 FEATURE_NAMES = [
     "n_query_tokens",
@@ -46,15 +47,21 @@ FEATURE_NAMES = [
 ]
 
 
-def rows_to_matrix(rows: pd.DataFrame, terms: dict, items: dict, desc: str) -> np.ndarray:
+def rows_to_matrix(
+    rows: pd.DataFrame, terms: dict, items: dict, desc: str
+) -> np.ndarray:
     matrix = np.empty((len(rows), len(FEATURE_NAMES)), dtype=np.float32)
-    for i, row in enumerate(tqdm(rows.itertuples(index=False), total=len(rows), desc=desc)):
+    for i, row in enumerate(
+        tqdm(rows.itertuples(index=False), total=len(rows), desc=desc)
+    ):
         features = pair_features(terms[row.term_id], items[row.item_id])
         matrix[i] = [features[name] for name in FEATURE_NAMES]
     return matrix
 
 
-def sample_frame(frame: pd.DataFrame, mask: pd.Series, n: int, seed: int) -> pd.DataFrame:
+def sample_frame(
+    frame: pd.DataFrame, mask: pd.Series, n: int, seed: int
+) -> pd.DataFrame:
     subset = frame.loc[mask]
     if len(subset) <= n:
         return subset
@@ -66,7 +73,9 @@ def pair_key(frame: pd.DataFrame) -> pd.Series:
 
 
 def load_train_term_negatives(path: Path, positives: pd.DataFrame) -> pd.DataFrame:
-    negatives = pd.read_csv(path, usecols=["term_id", "item_id"], dtype=str, keep_default_na=False)
+    negatives = pd.read_csv(
+        path, usecols=["term_id", "item_id"], dtype=str, keep_default_na=False
+    )
     negatives = negatives.drop_duplicates(["term_id", "item_id"]).reset_index(drop=True)
     positive_keys = set(pair_key(positives))
     keep = ~pair_key(negatives).isin(positive_keys)
@@ -83,7 +92,11 @@ def load_train_term_negatives(path: Path, positives: pd.DataFrame) -> pd.DataFra
 def build_unlabeled_negatives(args: argparse.Namespace) -> pd.DataFrame:
     negative_path = Path(args.negatives) if args.negatives else None
     if negative_path and negative_path.exists():
-        positives = pd.read_csv(Path(args.data_dir) / "training_pairs.csv", usecols=["term_id", "item_id"], dtype=str)
+        positives = pd.read_csv(
+            Path(args.data_dir) / "training_pairs.csv",
+            usecols=["term_id", "item_id"],
+            dtype=str,
+        )
         return load_train_term_negatives(negative_path, positives)
 
     if not args.allow_submission_negatives:
@@ -128,7 +141,9 @@ def train(args: argparse.Namespace) -> None:
     terms = load_terms(data_dir / "terms.csv")
     items = load_items(data_dir / "items.csv")
 
-    positives = pd.read_csv(data_dir / "training_pairs.csv", usecols=["term_id", "item_id"])
+    positives = pd.read_csv(
+        data_dir / "training_pairs.csv", usecols=["term_id", "item_id"]
+    )
     negatives = build_unlabeled_negatives(args)
 
     if args.n_pos and len(positives) > args.n_pos:
@@ -137,7 +152,9 @@ def train(args: argparse.Namespace) -> None:
     x_pos = rows_to_matrix(positives, terms, items, "pos")
     x_neg = rows_to_matrix(negatives, terms, items, "neg")
     x = np.vstack([x_pos, x_neg])
-    y = np.concatenate([np.ones(len(x_pos), dtype=np.int8), np.zeros(len(x_neg), dtype=np.int8)])
+    y = np.concatenate(
+        [np.ones(len(x_pos), dtype=np.int8), np.zeros(len(x_neg), dtype=np.int8)]
+    )
 
     x_train, x_valid, y_train, y_valid = train_test_split(
         x, y, test_size=args.valid_size, random_state=args.seed, stratify=y
@@ -173,9 +190,13 @@ def train(args: argparse.Namespace) -> None:
             best = (score, float(threshold))
     print(f"synthetic valid macro_f1={best[0]:.5f} threshold={best[1]:.3f}")
 
-    importances = pd.Series(clf.feature_importances_, index=FEATURE_NAMES).sort_values(ascending=False)
+    importances = pd.Series(clf.feature_importances_, index=FEATURE_NAMES).sort_values(
+        ascending=False
+    )
     print(importances.head(20).to_string())
-    joblib.dump({"model": clf, "features": FEATURE_NAMES, "threshold": best[1]}, model_path)
+    joblib.dump(
+        {"model": clf, "features": FEATURE_NAMES, "threshold": best[1]}, model_path
+    )
     print(f"wrote {model_path}")
 
 
@@ -189,9 +210,9 @@ def predict(args: argparse.Namespace) -> None:
     terms = load_terms(data_dir / "terms.csv")
     items = load_items(data_dir / "items.csv")
 
-    with (data_dir / "submission_pairs.csv").open(newline="", encoding="utf-8") as in_handle, out_path.open(
-        "w", newline="", encoding="utf-8"
-    ) as out_handle:
+    with (data_dir / "submission_pairs.csv").open(
+        newline="", encoding="utf-8"
+    ) as in_handle, out_path.open("w", newline="", encoding="utf-8") as out_handle:
         reader = csv.DictReader(in_handle)
         writer = csv.writer(out_handle)
         writer.writerow(["id", "term_id", "prob"])
@@ -217,7 +238,10 @@ def write_predictions(writer, clf, ids, term_ids, rows, terms, items) -> None:
         features = pair_features(terms[term_id], items[item_id])
         matrix[i] = [features[name] for name in FEATURE_NAMES]
     probs = clf.predict_proba(matrix)[:, 1]
-    writer.writerows((row_id, term_id, f"{prob:.8f}") for row_id, term_id, prob in zip(ids, term_ids, probs))
+    writer.writerows(
+        (row_id, term_id, f"{prob:.8f}")
+        for row_id, term_id, prob in zip(ids, term_ids, probs)
+    )
 
 
 def submit_file(args: argparse.Namespace) -> None:

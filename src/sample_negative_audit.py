@@ -1,3 +1,5 @@
+"""Sample mined negatives by band and score bucket for manual review."""
+
 from __future__ import annotations
 
 import argparse
@@ -7,8 +9,15 @@ from pathlib import Path
 
 import pandas as pd
 
-
-ITEM_COLUMNS = ["item_id", "title", "category", "brand", "gender", "age_group", "attributes"]
+ITEM_COLUMNS = [
+    "item_id",
+    "title",
+    "category",
+    "brand",
+    "gender",
+    "age_group",
+    "attributes",
+]
 
 
 def pair_key(frame: pd.DataFrame) -> pd.Series:
@@ -20,17 +29,23 @@ def assign_score_buckets(scores: pd.Series, n_bins: int) -> pd.Series:
         return pd.Series(["all"] * len(scores), index=scores.index)
 
     bins = min(n_bins, len(scores), int(scores.nunique(dropna=False)))
-    codes = pd.qcut(scores.rank(method="first"), q=bins, labels=False, duplicates="drop")
+    codes = pd.qcut(
+        scores.rank(method="first"), q=bins, labels=False, duplicates="drop"
+    )
     return codes.fillna(0).astype(int).map(lambda value: f"q{value + 1}")
 
 
-def stratified_sample(frame: pd.DataFrame, n_per_band: int, score_bins: int, seed: int) -> pd.DataFrame:
+def stratified_sample(
+    frame: pd.DataFrame, n_per_band: int, score_bins: int, seed: int
+) -> pd.DataFrame:
     sampled: list[pd.DataFrame] = []
     sample_seed = seed
 
     for band, band_frame in frame.groupby("negative_band", sort=True):
         band_frame = band_frame.copy()
-        band_frame["score_bucket"] = assign_score_buckets(band_frame["tfidf_score"], score_bins)
+        band_frame["score_bucket"] = assign_score_buckets(
+            band_frame["tfidf_score"], score_bins
+        )
         buckets = list(band_frame["score_bucket"].drop_duplicates())
         bucket_target = max(1, math.ceil(n_per_band / max(1, len(buckets))))
         band_parts: list[pd.DataFrame] = []
@@ -51,7 +66,9 @@ def stratified_sample(frame: pd.DataFrame, n_per_band: int, score_bins: int, see
     return pd.concat(sampled, ignore_index=True)
 
 
-def load_items_for_ids(data_dir: Path, item_ids: set[str], chunksize: int) -> pd.DataFrame:
+def load_items_for_ids(
+    data_dir: Path, item_ids: set[str], chunksize: int
+) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
     reader = pd.read_csv(
         data_dir / "items.csv",
@@ -75,7 +92,9 @@ def audit(args: argparse.Namespace) -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    negatives = pd.read_csv(args.negatives, dtype={"term_id": str, "item_id": str}, keep_default_na=False)
+    negatives = pd.read_csv(
+        args.negatives, dtype={"term_id": str, "item_id": str}, keep_default_na=False
+    )
     required = {"term_id", "item_id"}
     missing = required - set(negatives.columns)
     if missing:
@@ -85,23 +104,41 @@ def audit(args: argparse.Namespace) -> None:
         negatives["negative_band"] = "unknown"
     if "tfidf_score" not in negatives.columns:
         negatives["tfidf_score"] = 0.0
-    negatives["tfidf_score"] = pd.to_numeric(negatives["tfidf_score"], errors="coerce").fillna(0.0)
+    negatives["tfidf_score"] = pd.to_numeric(
+        negatives["tfidf_score"], errors="coerce"
+    ).fillna(0.0)
     negatives = negatives.drop_duplicates(["term_id", "item_id"]).reset_index(drop=True)
 
-    positives = pd.read_csv(data_dir / "training_pairs.csv", usecols=["term_id", "item_id"], dtype=str)
+    positives = pd.read_csv(
+        data_dir / "training_pairs.csv", usecols=["term_id", "item_id"], dtype=str
+    )
     overlap_mask = pair_key(negatives).isin(set(pair_key(positives)))
     overlap = int(overlap_mask.sum())
     if overlap and not args.allow_overlap:
-        examples = negatives.loc[overlap_mask, ["term_id", "item_id"]].head(10).to_dict("records")
-        raise ValueError(f"Found {overlap:,} negatives overlapping positives; examples={examples}")
+        examples = (
+            negatives.loc[overlap_mask, ["term_id", "item_id"]]
+            .head(10)
+            .to_dict("records")
+        )
+        raise ValueError(
+            f"Found {overlap:,} negatives overlapping positives; examples={examples}"
+        )
 
     sampled = stratified_sample(negatives, args.n_per_band, args.score_bins, args.seed)
     terms = pd.read_csv(data_dir / "terms.csv", dtype=str, keep_default_na=False)
-    terms = terms.loc[terms["term_id"].isin(set(sampled["term_id"])), ["term_id", "query"]]
-    items = load_items_for_ids(data_dir, set(sampled["item_id"].astype(str)), args.chunksize)
+    terms = terms.loc[
+        terms["term_id"].isin(set(sampled["term_id"])), ["term_id", "query"]
+    ]
+    items = load_items_for_ids(
+        data_dir, set(sampled["item_id"].astype(str)), args.chunksize
+    )
 
-    out = sampled.merge(terms, on="term_id", how="left").merge(items, on="item_id", how="left")
-    out = out.sort_values(["negative_band", "score_bucket", "tfidf_score"], ascending=[True, True, False])
+    out = sampled.merge(terms, on="term_id", how="left").merge(
+        items, on="item_id", how="left"
+    )
+    out = out.sort_values(
+        ["negative_band", "score_bucket", "tfidf_score"], ascending=[True, True, False]
+    )
     out.to_csv(output_path, index=False)
 
     if args.jsonl_output:
@@ -118,7 +155,9 @@ def audit(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sample mined negatives for LLM/manual audit.")
+    parser = argparse.ArgumentParser(
+        description="Sample mined negatives for LLM/manual audit."
+    )
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--negatives", default="outputs/train_term_negatives.csv")
     parser.add_argument("--output", default="outputs/negative_audit_sample.csv")

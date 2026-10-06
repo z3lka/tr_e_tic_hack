@@ -1,3 +1,5 @@
+"""Train and score a category-aware positive-unlabeled CatBoost model."""
+
 from __future__ import annotations
 
 import argparse
@@ -16,7 +18,6 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 from lexical_baseline import load_items, load_terms, normalize_text, pair_features
-
 
 BASE_FEATURE_NAMES = [
     "n_query_tokens",
@@ -84,7 +85,9 @@ def split_category(value: object) -> tuple[str, str, str, str]:
     return cat_l1, cat_l2, cat_l3, cat_leaf
 
 
-def add_category_levels(frame: pd.DataFrame, category_col: str = "category") -> pd.DataFrame:
+def add_category_levels(
+    frame: pd.DataFrame, category_col: str = "category"
+) -> pd.DataFrame:
     levels = pd.DataFrame(
         frame[category_col].map(split_category).tolist(),
         columns=["cat_l1", "cat_l2", "cat_l3", "cat_leaf"],
@@ -116,10 +119,14 @@ def build_term_category_lookup(
 
 
 def build_item_meta_lookup(items_path: Path) -> dict[str, dict[str, str]]:
-    items = pd.read_csv(items_path, usecols=["item_id", "category", "gender", "age_group"])
+    items = pd.read_csv(
+        items_path, usecols=["item_id", "category", "gender", "age_group"]
+    )
     items = add_category_levels(items)
     lookup: dict[str, dict[str, str]] = {}
-    for row in tqdm(items.itertuples(index=False), total=len(items), desc="item metadata"):
+    for row in tqdm(
+        items.itertuples(index=False), total=len(items), desc="item metadata"
+    ):
         lookup[row.item_id] = {
             "cat_l1": row.cat_l1,
             "cat_l2": row.cat_l2,
@@ -178,8 +185,14 @@ def rows_to_frame(
 
     iterator = tqdm(rows.itertuples(index=False), total=len(rows), desc=desc)
     for i, row in enumerate(iterator):
-        features: dict[str, float | str] = pair_features(terms[row.term_id], items[row.item_id])
-        features.update(category_pair_features(row.term_id, row.item_id, term_category_lookup, item_meta_lookup))
+        features: dict[str, float | str] = pair_features(
+            terms[row.term_id], items[row.item_id]
+        )
+        features.update(
+            category_pair_features(
+                row.term_id, row.item_id, term_category_lookup, item_meta_lookup
+            )
+        )
         numeric[i] = [float(features.get(name, 0.0)) for name in numeric_names]
         for name in ITEM_CAT_FEATURES:
             cat_values[name][i] = features.get(name, "unknown") or "unknown"
@@ -190,7 +203,9 @@ def rows_to_frame(
     return frame[FEATURE_NAMES]
 
 
-def sample_frame(frame: pd.DataFrame, mask: pd.Series, n: int, seed: int) -> pd.DataFrame:
+def sample_frame(
+    frame: pd.DataFrame, mask: pd.Series, n: int, seed: int
+) -> pd.DataFrame:
     subset = frame.loc[mask]
     if len(subset) <= n:
         return subset
@@ -202,7 +217,9 @@ def pair_key(frame: pd.DataFrame) -> pd.Series:
 
 
 def load_train_term_negatives(path: Path, positives: pd.DataFrame) -> pd.DataFrame:
-    negatives = pd.read_csv(path, usecols=["term_id", "item_id"], dtype=str, keep_default_na=False)
+    negatives = pd.read_csv(
+        path, usecols=["term_id", "item_id"], dtype=str, keep_default_na=False
+    )
     negatives = negatives.drop_duplicates(["term_id", "item_id"]).reset_index(drop=True)
     positive_keys = set(pair_key(positives))
     keep = ~pair_key(negatives).isin(positive_keys)
@@ -219,7 +236,11 @@ def load_train_term_negatives(path: Path, positives: pd.DataFrame) -> pd.DataFra
 def build_unlabeled_negatives(args: argparse.Namespace) -> pd.DataFrame:
     negative_path = Path(args.negatives) if args.negatives else None
     if negative_path and negative_path.exists():
-        positives = pd.read_csv(Path(args.data_dir) / "training_pairs.csv", usecols=["term_id", "item_id"], dtype=str)
+        positives = pd.read_csv(
+            Path(args.data_dir) / "training_pairs.csv",
+            usecols=["term_id", "item_id"],
+            dtype=str,
+        )
         return load_train_term_negatives(negative_path, positives)
 
     if not args.allow_submission_negatives:
@@ -230,7 +251,9 @@ def build_unlabeled_negatives(args: argparse.Namespace) -> pd.DataFrame:
         )
 
     data_dir = Path(args.data_dir)
-    pairs = pd.read_csv(data_dir / "submission_pairs.csv", usecols=["id", "term_id", "item_id"])
+    pairs = pd.read_csv(
+        data_dir / "submission_pairs.csv", usecols=["id", "term_id", "item_id"]
+    )
     scores = pd.read_csv(args.lexical_scores, usecols=["score"])
     if len(pairs) != len(scores):
         raise ValueError("submission_pairs and lexical_scores row counts differ")
@@ -280,16 +303,34 @@ def train(args: argparse.Namespace) -> None:
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
     terms, items, term_category_lookup, item_meta_lookup = load_feature_context(args)
-    positives = pd.read_csv(Path(args.data_dir) / "training_pairs.csv", usecols=["term_id", "item_id"])
+    positives = pd.read_csv(
+        Path(args.data_dir) / "training_pairs.csv", usecols=["term_id", "item_id"]
+    )
     negatives = build_unlabeled_negatives(args)
 
     if args.n_pos and len(positives) > args.n_pos:
         positives = positives.sample(n=args.n_pos, random_state=args.seed)
 
-    x_pos = rows_to_frame(positives, terms, items, term_category_lookup, item_meta_lookup, "positive features")
-    x_neg = rows_to_frame(negatives, terms, items, term_category_lookup, item_meta_lookup, "negative features")
+    x_pos = rows_to_frame(
+        positives,
+        terms,
+        items,
+        term_category_lookup,
+        item_meta_lookup,
+        "positive features",
+    )
+    x_neg = rows_to_frame(
+        negatives,
+        terms,
+        items,
+        term_category_lookup,
+        item_meta_lookup,
+        "negative features",
+    )
     x = pd.concat([x_pos, x_neg], ignore_index=True)
-    y = np.concatenate([np.ones(len(x_pos), dtype=np.int8), np.zeros(len(x_neg), dtype=np.int8)])
+    y = np.concatenate(
+        [np.ones(len(x_pos), dtype=np.int8), np.zeros(len(x_neg), dtype=np.int8)]
+    )
     print(f"matrix={x.shape} positives={int(y.sum()):,} positive_rate={y.mean():.4f}")
 
     del x_pos, x_neg
@@ -343,7 +384,9 @@ def train(args: argparse.Namespace) -> None:
             best = (float(score), float(threshold))
     print(f"synthetic valid macro_f1={best[0]:.5f} threshold={best[1]:.3f}")
 
-    importances = pd.Series(model.get_feature_importance(valid_pool), index=FEATURE_NAMES).sort_values(ascending=False)
+    importances = pd.Series(
+        model.get_feature_importance(valid_pool), index=FEATURE_NAMES
+    ).sort_values(ascending=False)
     print(importances.head(35).to_string())
 
     model.save_model(str(model_path))
@@ -376,9 +419,18 @@ def predict(args: argparse.Namespace) -> None:
         writer = csv.writer(out_handle)
         writer.writerow(["id", "term_id", "prob"])
 
-        reader = pd.read_csv(data_dir / "submission_pairs.csv", chunksize=args.chunk_size)
+        reader = pd.read_csv(
+            data_dir / "submission_pairs.csv", chunksize=args.chunk_size
+        )
         for chunk in tqdm(reader, desc="predict chunks"):
-            matrix = rows_to_frame(chunk, terms, items, term_category_lookup, item_meta_lookup, "chunk features")
+            matrix = rows_to_frame(
+                chunk,
+                terms,
+                items,
+                term_category_lookup,
+                item_meta_lookup,
+                "chunk features",
+            )
             pool = Pool(matrix, cat_features=CAT_FEATURES)
             prob = model.predict_proba(pool)[:, 1]
             writer.writerows(
@@ -414,7 +466,10 @@ def main() -> None:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--data-dir", default="data")
-    common.add_argument("--term-category-topk", default="outputs/category_aware_notebook/term_category_topk.csv")
+    common.add_argument(
+        "--term-category-topk",
+        default="outputs/category_aware_notebook/term_category_topk.csv",
+    )
 
     train_cmd = sub.add_parser("train", parents=[common])
     train_cmd.add_argument("--lexical-scores", default="outputs/lexical_scores.csv")
@@ -445,12 +500,16 @@ def main() -> None:
 
     pred_cmd = sub.add_parser("predict", parents=[common])
     pred_cmd.add_argument("--model", default="outputs/catboost_category_aware.cbm")
-    pred_cmd.add_argument("--output", default="outputs/catboost_category_aware_scores.csv")
+    pred_cmd.add_argument(
+        "--output", default="outputs/catboost_category_aware_scores.csv"
+    )
     pred_cmd.add_argument("--chunk-size", type=int, default=150_000)
     pred_cmd.set_defaults(func=predict)
 
     submit_cmd = sub.add_parser("submit")
-    submit_cmd.add_argument("--scores", default="outputs/catboost_category_aware_scores.csv")
+    submit_cmd.add_argument(
+        "--scores", default="outputs/catboost_category_aware_scores.csv"
+    )
     submit_cmd.add_argument("--output", default="outputs/catboost_category_aware.csv")
     submit_cmd.add_argument("--threshold", type=float, default=0.5)
     submit_cmd.add_argument("--rate", type=float)

@@ -13,7 +13,9 @@ def test_make_term_folds_keeps_each_term_in_one_fold() -> None:
     rows: list[tuple[str, str]] = []
     for term_index in range(25):
         for item_index in range(1 + term_index % 7):
-            rows.append((f"term_{term_index:02d}", f"item_{term_index:02d}_{item_index:02d}"))
+            rows.append(
+                (f"term_{term_index:02d}", f"item_{term_index:02d}_{item_index:02d}")
+            )
     positives = pd.DataFrame(rows, columns=["term_id", "item_id"])
 
     folds = make_term_folds(positives, n_splits=5, seed=42)

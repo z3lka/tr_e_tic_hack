@@ -1,3 +1,5 @@
+"""Learn query-to-category priors for category-aware relevance models."""
+
 from __future__ import annotations
 
 import math
@@ -12,7 +14,6 @@ from sklearn.linear_model import SGDClassifier
 from tqdm import tqdm
 
 from lexical_baseline import normalize_text
-
 
 CATEGORY_LEVELS = ("cat_l1", "cat_l2")
 CATEGORY_TOPK = 5
@@ -34,7 +35,9 @@ def split_category(value: object) -> tuple[str, str, str, str]:
     return cat_l1, cat_l2, cat_l3, cat_leaf
 
 
-def add_category_levels(frame: pd.DataFrame, category_col: str = "category") -> pd.DataFrame:
+def add_category_levels(
+    frame: pd.DataFrame, category_col: str = "category"
+) -> pd.DataFrame:
     levels = pd.DataFrame(
         frame[category_col].map(split_category).tolist(),
         columns=["cat_l1", "cat_l2", "cat_l3", "cat_leaf"],
@@ -52,8 +55,12 @@ def build_category_examples(
 ) -> pd.DataFrame:
     required_term_ids = set(positive_pairs["term_id"].astype(str))
     required_item_ids = set(positive_pairs["item_id"].astype(str))
-    term_subset = terms.loc[terms["term_id"].astype(str).isin(required_term_ids), ["term_id", "query"]]
-    item_subset = items.loc[items["item_id"].astype(str).isin(required_item_ids), ["item_id", "category"]]
+    term_subset = terms.loc[
+        terms["term_id"].astype(str).isin(required_term_ids), ["term_id", "query"]
+    ]
+    item_subset = items.loc[
+        items["item_id"].astype(str).isin(required_item_ids), ["item_id", "category"]
+    ]
 
     examples = (
         positive_pairs[["term_id", "item_id"]]
@@ -76,6 +83,8 @@ def build_category_examples(
 
 @dataclass
 class ConstantCategoryModel:
+    """Return a fixed category distribution when training has one class."""
+
     label: str
 
     def __post_init__(self) -> None:
@@ -86,6 +95,8 @@ class ConstantCategoryModel:
 
 
 class CategorySignal:
+    """Fit TF-IDF category classifiers and return each query's top categories."""
+
     def __init__(
         self,
         levels: tuple[str, ...] = CATEGORY_LEVELS,
@@ -146,10 +157,14 @@ class CategorySignal:
                 model.fit(x, y)
             self.models[level] = model
             elapsed = time.time() - start
-            print(f"{level}: classes={len(classes):,} examples={len(y):,} seconds={elapsed:.1f}")
+            print(
+                f"{level}: classes={len(classes):,} examples={len(y):,} seconds={elapsed:.1f}"
+            )
         return self
 
-    def predict_terms(self, terms: pd.DataFrame, chunk_size: int = 25_000) -> pd.DataFrame:
+    def predict_terms(
+        self, terms: pd.DataFrame, chunk_size: int = 25_000
+    ) -> pd.DataFrame:
         if self.vectorizer is None:
             raise RuntimeError("fit CategorySignal before predicting")
         if terms["term_id"].duplicated().any():
@@ -171,7 +186,9 @@ class CategorySignal:
                     indices = np.argsort(-proba, axis=1)[:, :k]
                 else:
                     indices = np.argpartition(proba, -k, axis=1)[:, -k:]
-                    local_order = np.argsort(-np.take_along_axis(proba, indices, axis=1), axis=1)
+                    local_order = np.argsort(
+                        -np.take_along_axis(proba, indices, axis=1), axis=1
+                    )
                     indices = np.take_along_axis(indices, local_order, axis=1)
                 scores = np.take_along_axis(proba, indices, axis=1).astype(np.float32)
                 labels = model.classes_[indices]

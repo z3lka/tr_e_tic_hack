@@ -1,6 +1,6 @@
 # Project Notes
 
-Last updated: 2026-07-10
+Last updated: 2026-10-06
 
 ## What We Are Doing
 
@@ -53,8 +53,9 @@ Local competition data:
 - `notebooks/catboost_train_term_negatives_kaggle.ipynb`: Kaggle-ready CatBoost notebook that avoids submission-pair negative leakage by using train-term negatives.
 - `notebooks/vector_space_negatives_catboost_kaggle.ipynb`: self-contained Kaggle notebook using vector-space negative mining and CatBoost.
 - `notebooks/grouped_5fold_oof_kaggle.ipynb`: standalone Kaggle GPU notebook with embedded source modules for the full grouped OOF workflow and resumable fold/cache controls.
+- `notebooks/fast_hybrid_embedding_retrieval_kaggle.ipynb`: standalone Kaggle GPU notebook for frozen and contrastive embedding retrieval experiments.
 - `scripts/build_grouped_oof_kaggle_notebook.py`: regenerates the standalone grouped OOF notebook from the current `src/` modules.
-- `notebooks/from_zero_sub.ipynb`, `notebooks/playground.ipynb`: exploratory notebooks.
+- `scripts/build_fast_hybrid_embedding_notebook.py`: regenerates the standalone hybrid embedding notebook from the current `src/` modules.
 
 ## What Has Been Done
 

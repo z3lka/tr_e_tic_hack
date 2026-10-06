@@ -1,3 +1,5 @@
+"""Train and score a contrastive shared-encoder two-tower retrieval model."""
+
 from __future__ import annotations
 
 import argparse
@@ -18,9 +20,16 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-
 DEFAULT_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-ITEM_COLUMNS = ["item_id", "title", "category", "brand", "gender", "age_group", "attributes"]
+ITEM_COLUMNS = [
+    "item_id",
+    "title",
+    "category",
+    "brand",
+    "gender",
+    "age_group",
+    "attributes",
+]
 SPACE_RE = re.compile(r"\s+")
 
 
@@ -57,10 +66,25 @@ def require_transformer_stack() -> tuple[Any, ...]:
         from torch import nn
         from torch.nn import functional as F
         from torch.utils.data import DataLoader, Dataset
-        from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
+        from transformers import (
+            AutoModel,
+            AutoTokenizer,
+            get_linear_schedule_with_warmup,
+        )
     except (ImportError, ModuleNotFoundError) as exc:
-        raise RuntimeError("Contrastive training and encoding require torch and transformers") from exc
-    return torch, nn, F, DataLoader, Dataset, AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
+        raise RuntimeError(
+            "Contrastive training and encoding require torch and transformers"
+        ) from exc
+    return (
+        torch,
+        nn,
+        F,
+        DataLoader,
+        Dataset,
+        AutoModel,
+        AutoTokenizer,
+        get_linear_schedule_with_warmup,
+    )
 
 
 def seed_everything(seed: int, torch: Any | None = None) -> None:
@@ -102,22 +126,35 @@ def grouped_inner_split(
         raise ValueError(f"valid_size must be in (0, 1), got {valid_size}")
     terms = positives["term_id"].drop_duplicates().astype(str).to_numpy()
     if len(terms) < 2:
-        raise ValueError("At least two terms are required for grouped checkpoint selection")
+        raise ValueError(
+            "At least two terms are required for grouped checkpoint selection"
+        )
     rng = np.random.default_rng(seed)
     terms = terms.copy()
     rng.shuffle(terms)
     n_valid = min(len(terms) - 1, max(1, int(round(len(terms) * valid_size))))
     valid_terms = set(terms[:n_valid])
-    inner_train = positives.loc[~positives["term_id"].isin(valid_terms)].reset_index(drop=True)
-    inner_valid = positives.loc[positives["term_id"].isin(valid_terms)].reset_index(drop=True)
+    inner_train = positives.loc[~positives["term_id"].isin(valid_terms)].reset_index(
+        drop=True
+    )
+    inner_valid = positives.loc[positives["term_id"].isin(valid_terms)].reset_index(
+        drop=True
+    )
     if set(inner_train["term_id"]) & set(inner_valid["term_id"]):
         raise AssertionError("Term leakage in inner validation split")
-    split = pd.DataFrame(
-        {
-            "term_id": terms,
-            "split": ["inner_valid" if term in valid_terms else "inner_train" for term in terms],
-        }
-    ).sort_values("term_id").reset_index(drop=True)
+    split = (
+        pd.DataFrame(
+            {
+                "term_id": terms,
+                "split": [
+                    "inner_valid" if term in valid_terms else "inner_train"
+                    for term in terms
+                ],
+            }
+        )
+        .sort_values("term_id")
+        .reset_index(drop=True)
+    )
     return inner_train, inner_valid, split
 
 
@@ -135,7 +172,9 @@ def apply_outer_term_split(
     outer_terms = set(split.loc[split["fold"].eq(outer_fold), "term_id"].astype(str))
     if not outer_terms:
         raise ValueError(f"No terms assigned to outer fold {outer_fold}")
-    outer_train = positives.loc[~positives["term_id"].isin(outer_terms)].reset_index(drop=True)
+    outer_train = positives.loc[~positives["term_id"].isin(outer_terms)].reset_index(
+        drop=True
+    )
     if set(outer_train["term_id"]) & outer_terms:
         raise AssertionError("Outer term leakage")
     if outer_train.empty:
@@ -180,7 +219,9 @@ def masked_infonce_loss(
         raise ValueError("temperature must be positive")
     logits = query_embeddings @ candidate_embeddings.T / temperature
     if logits.shape != mask.shape:
-        raise ValueError(f"mask shape {mask.shape} does not match logits {logits.shape}")
+        raise ValueError(
+            f"mask shape {mask.shape} does not match logits {logits.shape}"
+        )
     if bool(mask.gather(1, target_columns.unsqueeze(1)).any().item()):
         raise AssertionError("A designated InfoNCE target was masked")
     logits = logits.masked_fill(mask, torch_finfo_min(logits))
@@ -219,7 +260,9 @@ def load_negative_pool(path: Path) -> dict[str, dict[str, list[str]]]:
                 family = "lexical"
             elif "embedding" in str(row.negative_source):
                 family = "embedding"
-        pool.setdefault(str(row.term_id), {}).setdefault(family, []).append(str(row.item_id))
+        pool.setdefault(str(row.term_id), {}).setdefault(family, []).append(
+            str(row.item_id)
+        )
     return pool
 
 
@@ -247,14 +290,20 @@ def assemble_candidate_item_ids(
         if "row_index" in batch_rows
         else np.arange(batch_size)
     )
-    rng = np.random.default_rng(stable_seed(seed, epoch, *sorted(int(value) for value in row_indices)))
+    rng = np.random.default_rng(
+        stable_seed(seed, epoch, *sorted(int(value) for value in row_indices))
+    )
 
     if use_semi_hard:
         for local_row, row in enumerate(batch_rows.itertuples(index=False)):
             term_id = str(row.term_id)
             row_index = int(getattr(row, "row_index", local_row))
             preferred = "lexical" if (row_index + epoch) % 2 == 0 else "embedding"
-            alternatives = [preferred, "embedding" if preferred == "lexical" else "lexical", "uniform"]
+            alternatives = [
+                preferred,
+                "embedding" if preferred == "lexical" else "lexical",
+                "uniform",
+            ]
             chosen: str | None = None
             chosen_source = preferred
             for family in alternatives:
@@ -272,13 +321,17 @@ def assemble_candidate_item_ids(
                     break
             if chosen is None:
                 for _ in range(max(1_000, len(catalog_item_ids))):
-                    item_id = str(catalog_item_ids[int(rng.integers(0, len(catalog_item_ids)))])
+                    item_id = str(
+                        catalog_item_ids[int(rng.integers(0, len(catalog_item_ids)))]
+                    )
                     if item_id not in selected:
                         chosen = item_id
                         chosen_source = "uniform_backfill"
                         break
             if chosen is None:
-                raise ValueError("Catalog is too small to create unique semi-hard candidates")
+                raise ValueError(
+                    "Catalog is too small to create unique semi-hard candidates"
+                )
             candidates.append(chosen)
             sources.append(chosen_source)
             selected.add(chosen)
@@ -296,7 +349,9 @@ def assemble_candidate_item_ids(
                         item_id = fallback_id
                         break
                 else:
-                    raise ValueError("Catalog is too small for the requested shared uniform negatives")
+                    raise ValueError(
+                        "Catalog is too small for the requested shared uniform negatives"
+                    )
             else:
                 continue
         candidates.append(item_id)
@@ -319,7 +374,9 @@ def make_model_class(torch: Any, nn: Any, F: Any):
         def pool(output: Any, attention_mask: Any) -> Any:
             token_embeddings = output.last_hidden_state
             mask = attention_mask.unsqueeze(-1).to(token_embeddings.dtype)
-            return (token_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+            return (token_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(
+                min=1e-9
+            )
 
         def encode_query(self, batch: dict[str, Any]) -> Any:
             pooled = self.pool(self.encoder(**batch), batch["attention_mask"])
@@ -332,16 +389,29 @@ def make_model_class(torch: Any, nn: Any, F: Any):
     return ContrastiveBiEncoder
 
 
-def load_text_context(data_dir: Path) -> tuple[dict[str, str], dict[str, str], np.ndarray]:
-    terms = pd.read_csv(data_dir / "terms.csv", usecols=["term_id", "query"], dtype=str, keep_default_na=False)
+def load_text_context(
+    data_dir: Path,
+) -> tuple[dict[str, str], dict[str, str], np.ndarray]:
+    terms = pd.read_csv(
+        data_dir / "terms.csv",
+        usecols=["term_id", "query"],
+        dtype=str,
+        keep_default_na=False,
+    )
     term_texts = dict(zip(terms["term_id"].astype(str), terms["query"].map(clean_text)))
-    items = pd.read_csv(data_dir / "items.csv", usecols=ITEM_COLUMNS, dtype=str, keep_default_na=False)
+    items = pd.read_csv(
+        data_dir / "items.csv", usecols=ITEM_COLUMNS, dtype=str, keep_default_na=False
+    )
     item_ids = items["item_id"].astype(str).to_numpy()
-    item_texts = {str(row.item_id): build_item_text(row) for row in items.itertuples(index=False)}
+    item_texts = {
+        str(row.item_id): build_item_text(row) for row in items.itertuples(index=False)
+    }
     return term_texts, item_texts, item_ids
 
 
 class HybridBatchBuilder:
+    """Build deterministic batches with in-batch and mined negative items."""
+
     def __init__(
         self,
         tokenizer: Any,
@@ -386,14 +456,26 @@ class HybridBatchBuilder:
         try:
             item_batch_texts = [self.item_texts[item_id] for item_id in candidates]
         except KeyError as exc:
-            raise KeyError(f"Negative pool contains unknown catalog item {exc.args[0]}") from exc
+            raise KeyError(
+                f"Negative pool contains unknown catalog item {exc.args[0]}"
+            ) from exc
         query_batch = self.tokenizer(
-            query_texts, padding=True, truncation=True, max_length=self.query_max_length, return_tensors="pt"
+            query_texts,
+            padding=True,
+            truncation=True,
+            max_length=self.query_max_length,
+            return_tensors="pt",
         )
         item_batch = self.tokenizer(
-            item_batch_texts, padding=True, truncation=True, max_length=self.item_max_length, return_tensors="pt"
+            item_batch_texts,
+            padding=True,
+            truncation=True,
+            max_length=self.item_max_length,
+            return_tensors="pt",
         )
-        mask = known_positive_mask_numpy(term_ids, candidates, self.positives_by_term, targets)
+        mask = known_positive_mask_numpy(
+            term_ids, candidates, self.positives_by_term, targets
+        )
         self.source_counts.update(sources)
         return query_batch, item_batch, mask, targets
 
@@ -419,12 +501,16 @@ def save_checkpoint(
         },
         model_dir / "projection_heads.pt",
     )
-    (model_dir / "contrastive_config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    (model_dir / "contrastive_config.json").write_text(
+        json.dumps(config, indent=2), encoding="utf-8"
+    )
 
 
 def load_checkpoint(model_dir: Path, device: Any) -> tuple[Any, ...]:
     torch, nn, F, _, _, AutoModel, AutoTokenizer, _ = require_transformer_stack()
-    config = json.loads((model_dir / "contrastive_config.json").read_text(encoding="utf-8"))
+    config = json.loads(
+        (model_dir / "contrastive_config.json").read_text(encoding="utf-8")
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     encoder = AutoModel.from_pretrained(model_dir)
     Model = make_model_class(torch, nn, F)
@@ -438,7 +524,9 @@ def load_checkpoint(model_dir: Path, device: Any) -> tuple[Any, ...]:
 
 def train(args: argparse.Namespace) -> None:
     started = time.time()
-    torch, nn, F, DataLoader, Dataset, AutoModel, AutoTokenizer, get_scheduler = require_transformer_stack()
+    torch, nn, F, DataLoader, Dataset, AutoModel, AutoTokenizer, get_scheduler = (
+        require_transformer_stack()
+    )
     seed_everything(args.seed, torch)
     device = choose_device(torch, args.device)
     data_dir = Path(args.data_dir)
@@ -446,12 +534,20 @@ def train(args: argparse.Namespace) -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
     positives = load_positive_pairs(data_dir / "training_pairs.csv")
     positives, outer_terms = apply_outer_term_split(
-        positives, Path(args.split_manifest) if args.split_manifest else None, args.outer_fold
+        positives,
+        Path(args.split_manifest) if args.split_manifest else None,
+        args.outer_fold,
     )
     if args.limit_positives and len(positives) > args.limit_positives:
         kept_terms = positives["term_id"].drop_duplicates().astype(str)
-        positives = positives.loc[positives["term_id"].isin(set(kept_terms))].head(args.limit_positives).reset_index(drop=True)
-    inner_train, inner_valid, inner_split = grouped_inner_split(positives, args.inner_valid_size, args.seed)
+        positives = (
+            positives.loc[positives["term_id"].isin(set(kept_terms))]
+            .head(args.limit_positives)
+            .reset_index(drop=True)
+        )
+    inner_train, inner_valid, inner_split = grouped_inner_split(
+        positives, args.inner_valid_size, args.seed
+    )
     inner_split["outer_fold"] = args.outer_fold
     inner_split["used_in_full_refit"] = int(args.refit_full)
     inner_split.to_csv(model_dir / "training_term_split.csv", index=False)
@@ -463,8 +559,12 @@ def train(args: argparse.Namespace) -> None:
     missing_terms = set(positives["term_id"].astype(str)) - set(term_texts)
     missing_items = set(positives["item_id"].astype(str)) - set(item_texts)
     if missing_terms or missing_items:
-        raise KeyError(f"missing_terms={len(missing_terms)} missing_items={len(missing_items)}")
-    negative_pool = load_negative_pool(Path(args.negative_pool)) if args.use_semi_hard else {}
+        raise KeyError(
+            f"missing_terms={len(missing_terms)} missing_items={len(missing_items)}"
+        )
+    negative_pool = (
+        load_negative_pool(Path(args.negative_pool)) if args.use_semi_hard else {}
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     encoder = AutoModel.from_pretrained(args.model_name)
@@ -482,43 +582,94 @@ def train(args: argparse.Namespace) -> None:
 
         def __getitem__(self, index: int) -> dict[str, object]:
             row = self.rows.iloc[index]
-            return {"term_id": str(row.term_id), "item_id": str(row.item_id), "row_index": int(row.row_index)}
+            return {
+                "term_id": str(row.term_id),
+                "item_id": str(row.item_id),
+                "row_index": int(row.row_index),
+            }
 
     train_builder = HybridBatchBuilder(
-        tokenizer, term_texts, item_texts, catalog_item_ids, negative_pool, positives_by_term,
-        args.query_max_length, args.item_max_length, args.seed, args.uniform_multiplier, args.use_semi_hard,
+        tokenizer,
+        term_texts,
+        item_texts,
+        catalog_item_ids,
+        negative_pool,
+        positives_by_term,
+        args.query_max_length,
+        args.item_max_length,
+        args.seed,
+        args.uniform_multiplier,
+        args.use_semi_hard,
     )
     valid_builder = HybridBatchBuilder(
-        tokenizer, term_texts, item_texts, catalog_item_ids, negative_pool, positives_by_term,
-        args.query_max_length, args.item_max_length, args.seed + 1, args.uniform_multiplier, args.use_semi_hard,
+        tokenizer,
+        term_texts,
+        item_texts,
+        catalog_item_ids,
+        negative_pool,
+        positives_by_term,
+        args.query_max_length,
+        args.item_max_length,
+        args.seed + 1,
+        args.uniform_multiplier,
+        args.use_semi_hard,
     )
     generator = torch.Generator()
     generator.manual_seed(args.seed)
     train_loader = DataLoader(
-        PositiveDataset(inner_train), batch_size=args.batch_size, shuffle=True, generator=generator,
-        num_workers=args.num_workers, pin_memory=device.type == "cuda", collate_fn=train_builder,
+        PositiveDataset(inner_train),
+        batch_size=args.batch_size,
+        shuffle=True,
+        generator=generator,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+        collate_fn=train_builder,
     )
     valid_loader = DataLoader(
-        PositiveDataset(inner_valid), batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=device.type == "cuda", collate_fn=valid_builder,
+        PositiveDataset(inner_valid),
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+        collate_fn=valid_builder,
     )
     parameter_groups = [
-        {"params": model.encoder.parameters(), "lr": args.learning_rate, "weight_decay": args.weight_decay},
-        {"params": model.query_projection.parameters(), "lr": args.head_learning_rate, "weight_decay": args.weight_decay},
-        {"params": model.item_projection.parameters(), "lr": args.head_learning_rate, "weight_decay": args.weight_decay},
+        {
+            "params": model.encoder.parameters(),
+            "lr": args.learning_rate,
+            "weight_decay": args.weight_decay,
+        },
+        {
+            "params": model.query_projection.parameters(),
+            "lr": args.head_learning_rate,
+            "weight_decay": args.weight_decay,
+        },
+        {
+            "params": model.item_projection.parameters(),
+            "lr": args.head_learning_rate,
+            "weight_decay": args.weight_decay,
+        },
     ]
     optimizer = torch.optim.AdamW(parameter_groups)
     steps_per_epoch = math.ceil(len(train_loader) / args.grad_accum_steps)
-    total_steps = min(args.max_steps, steps_per_epoch * args.epochs) if args.max_steps else steps_per_epoch * args.epochs
+    total_steps = (
+        min(args.max_steps, steps_per_epoch * args.epochs)
+        if args.max_steps
+        else steps_per_epoch * args.epochs
+    )
     scheduler = get_scheduler(
-        optimizer, num_warmup_steps=int(total_steps * args.warmup_ratio), num_training_steps=total_steps
+        optimizer,
+        num_warmup_steps=int(total_steps * args.warmup_ratio),
+        num_training_steps=total_steps,
     )
     amp_enabled = args.fp16 and device.type == "cuda"
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     cache_fingerprint = None
     if args.cache_manifest:
-        cache_fingerprint = json.loads(Path(args.cache_manifest).read_text(encoding="utf-8")).get("cache_key")
+        cache_fingerprint = json.loads(
+            Path(args.cache_manifest).read_text(encoding="utf-8")
+        ).get("cache_key")
     base_config: dict[str, object] = {
         "base_model": args.model_name,
         "hidden_size": hidden_size,
@@ -537,7 +688,9 @@ def train(args: argparse.Namespace) -> None:
         "inner_train_terms": int(inner_train["term_id"].nunique()),
         "inner_valid_terms": int(inner_valid["term_id"].nunique()),
         "cache_fingerprint": cache_fingerprint,
-        "negative_pool_fingerprint": file_fingerprint(Path(args.negative_pool)) if args.use_semi_hard else None,
+        "negative_pool_fingerprint": (
+            file_fingerprint(Path(args.negative_pool)) if args.use_semi_hard else None
+        ),
     }
 
     def batch_loss(batch: tuple[Any, ...]) -> Any:
@@ -546,10 +699,14 @@ def train(args: argparse.Namespace) -> None:
         item_batch = move_batch(item_batch, device)
         mask = torch.from_numpy(mask_array).to(device=device, dtype=torch.bool)
         targets = torch.from_numpy(target_array).to(device=device, dtype=torch.long)
-        with torch.autocast(device_type=device.type, enabled=amp_enabled, dtype=torch.float16):
+        with torch.autocast(
+            device_type=device.type, enabled=amp_enabled, dtype=torch.float16
+        ):
             query_embedding = model.encode_query(query_batch)
             item_embedding = model.encode_item(item_batch)
-            return masked_infonce_loss(query_embedding, item_embedding, mask, targets, args.temperature, F)
+            return masked_infonce_loss(
+                query_embedding, item_embedding, mask, targets, args.temperature, F
+            )
 
     def evaluate() -> float:
         model.eval()
@@ -574,7 +731,9 @@ def train(args: argparse.Namespace) -> None:
         optimizer.zero_grad(set_to_none=True)
         total_loss = 0.0
         total_rows = 0
-        for step, batch in enumerate(tqdm(train_loader, desc=f"contrastive epoch {epoch}"), start=1):
+        for step, batch in enumerate(
+            tqdm(train_loader, desc=f"contrastive epoch {epoch}"), start=1
+        ):
             loss = batch_loss(batch) / args.grad_accum_steps
             scaler.scale(loss).backward()
             rows = len(batch[3])
@@ -592,12 +751,18 @@ def train(args: argparse.Namespace) -> None:
                     break
         valid_loss = evaluate()
         train_loss = total_loss / max(1, total_rows)
-        epoch_metrics.append({"epoch": epoch, "train_loss": train_loss, "inner_valid_loss": valid_loss})
-        print(f"epoch={epoch} train_loss={train_loss:.6f} inner_valid_loss={valid_loss:.6f}")
+        epoch_metrics.append(
+            {"epoch": epoch, "train_loss": train_loss, "inner_valid_loss": valid_loss}
+        )
+        print(
+            f"epoch={epoch} train_loss={train_loss:.6f} inner_valid_loss={valid_loss:.6f}"
+        )
         if valid_loss < best_loss:
             best_loss = valid_loss
             best_epoch = epoch
-            save_checkpoint(model_dir, model, tokenizer, {**base_config, "best_epoch": epoch}, torch)
+            save_checkpoint(
+                model_dir, model, tokenizer, {**base_config, "best_epoch": epoch}, torch
+            )
         if args.max_steps and global_step >= args.max_steps:
             break
 
@@ -614,21 +779,45 @@ def train(args: argparse.Namespace) -> None:
         encoder = AutoModel.from_pretrained(args.model_name)
         model = Model(encoder, hidden_size, args.projection_dim).to(device)
         full_builder = HybridBatchBuilder(
-            tokenizer, term_texts, item_texts, catalog_item_ids, negative_pool, positives_by_term,
-            args.query_max_length, args.item_max_length, args.seed + 10_000,
-            args.uniform_multiplier, args.use_semi_hard,
+            tokenizer,
+            term_texts,
+            item_texts,
+            catalog_item_ids,
+            negative_pool,
+            positives_by_term,
+            args.query_max_length,
+            args.item_max_length,
+            args.seed + 10_000,
+            args.uniform_multiplier,
+            args.use_semi_hard,
         )
         full_generator = torch.Generator()
         full_generator.manual_seed(args.seed + 10_000)
         full_loader = DataLoader(
-            PositiveDataset(positives), batch_size=args.batch_size, shuffle=True,
-            generator=full_generator, num_workers=args.num_workers,
-            pin_memory=device.type == "cuda", collate_fn=full_builder,
+            PositiveDataset(positives),
+            batch_size=args.batch_size,
+            shuffle=True,
+            generator=full_generator,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+            collate_fn=full_builder,
         )
         refit_parameter_groups = [
-            {"params": model.encoder.parameters(), "lr": args.learning_rate, "weight_decay": args.weight_decay},
-            {"params": model.query_projection.parameters(), "lr": args.head_learning_rate, "weight_decay": args.weight_decay},
-            {"params": model.item_projection.parameters(), "lr": args.head_learning_rate, "weight_decay": args.weight_decay},
+            {
+                "params": model.encoder.parameters(),
+                "lr": args.learning_rate,
+                "weight_decay": args.weight_decay,
+            },
+            {
+                "params": model.query_projection.parameters(),
+                "lr": args.head_learning_rate,
+                "weight_decay": args.weight_decay,
+            },
+            {
+                "params": model.item_projection.parameters(),
+                "lr": args.head_learning_rate,
+                "weight_decay": args.weight_decay,
+            },
         ]
         optimizer = torch.optim.AdamW(refit_parameter_groups)
         refit_epochs = max(1, best_epoch)
@@ -646,12 +835,16 @@ def train(args: argparse.Namespace) -> None:
             model.train()
             full_builder.epoch = epoch - 1
             optimizer.zero_grad(set_to_none=True)
-            for step, batch in enumerate(tqdm(full_loader, desc=f"full outer refit {epoch}"), start=1):
+            for step, batch in enumerate(
+                tqdm(full_loader, desc=f"full outer refit {epoch}"), start=1
+            ):
                 loss = batch_loss(batch) / args.grad_accum_steps
                 scaler.scale(loss).backward()
                 if step % args.grad_accum_steps == 0 or step == len(full_loader):
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.max_grad_norm
+                    )
                     scaler.step(optimizer)
                     scaler.update()
                     scheduler.step()
@@ -690,7 +883,9 @@ def train(args: argparse.Namespace) -> None:
         "refit_negative_source_counts": refit_source_counts,
         "elapsed_seconds": time.time() - started,
     }
-    (model_dir / "training_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (model_dir / "training_metrics.json").write_text(
+        json.dumps(metrics, indent=2), encoding="utf-8"
+    )
     print(json.dumps(metrics, indent=2))
 
 
@@ -712,29 +907,60 @@ def encode_batches(
     with torch.inference_mode():
         for start in tqdm(range(0, len(ids), batch_size), desc=f"encode {tower}"):
             texts = [text_by_id[value] for value in ids[start : start + batch_size]]
-            batch = tokenizer(texts, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
+            batch = tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
             batch = move_batch(batch, device)
-            with torch.autocast(device_type=device.type, enabled=amp_enabled, dtype=torch.float16):
-                embeddings = model.encode_query(batch) if tower == "query" else model.encode_item(batch)
+            with torch.autocast(
+                device_type=device.type, enabled=amp_enabled, dtype=torch.float16
+            ):
+                embeddings = (
+                    model.encode_query(batch)
+                    if tower == "query"
+                    else model.encode_item(batch)
+                )
             parts.append(embeddings.float().cpu().numpy().astype(np.float16))
-    return np.concatenate(parts) if parts else np.empty((0, int(model.query_projection.out_features)), dtype=np.float16)
+    return (
+        np.concatenate(parts)
+        if parts
+        else np.empty((0, int(model.query_projection.out_features)), dtype=np.float16)
+    )
 
 
-def load_entity_texts(data_dir: Path, entity: str, ids: set[str] | None = None) -> tuple[list[str], dict[str, str]]:
+def load_entity_texts(
+    data_dir: Path, entity: str, ids: set[str] | None = None
+) -> tuple[list[str], dict[str, str]]:
     if entity == "terms":
-        frame = pd.read_csv(data_dir / "terms.csv", usecols=["term_id", "query"], dtype=str, keep_default_na=False)
+        frame = pd.read_csv(
+            data_dir / "terms.csv",
+            usecols=["term_id", "query"],
+            dtype=str,
+            keep_default_na=False,
+        )
         if ids is not None:
             frame = frame.loc[frame["term_id"].isin(ids)]
         frame = frame.sort_values("term_id")
         ordered = frame["term_id"].astype(str).tolist()
         return ordered, dict(zip(ordered, frame["query"].map(clean_text)))
     if entity == "items":
-        frame = pd.read_csv(data_dir / "items.csv", usecols=ITEM_COLUMNS, dtype=str, keep_default_na=False)
+        frame = pd.read_csv(
+            data_dir / "items.csv",
+            usecols=ITEM_COLUMNS,
+            dtype=str,
+            keep_default_na=False,
+        )
         if ids is not None:
             frame = frame.loc[frame["item_id"].isin(ids)]
         frame = frame.sort_values("item_id")
         ordered = frame["item_id"].astype(str).tolist()
-        return ordered, {str(row.item_id): build_item_text(row) for row in frame.itertuples(index=False)}
+        return ordered, {
+            str(row.item_id): build_item_text(row)
+            for row in frame.itertuples(index=False)
+        }
     raise ValueError(f"Unknown entity: {entity}")
 
 
@@ -747,12 +973,25 @@ def encode(args: argparse.Namespace) -> None:
     device = next(model.parameters()).device
     ids, text_by_id = load_entity_texts(Path(args.data_dir), args.entity)
     tower = "query" if args.entity == "terms" else "item"
-    max_length = int(config["query_max_length"] if tower == "query" else config["item_max_length"])
+    max_length = int(
+        config["query_max_length"] if tower == "query" else config["item_max_length"]
+    )
     embeddings = encode_batches(
-        ids, text_by_id, tokenizer, model, tower, max_length, args.batch_size, device, torch, args.fp16
+        ids,
+        text_by_id,
+        tokenizer,
+        model,
+        tower,
+        max_length,
+        args.batch_size,
+        device,
+        torch,
+        args.fp16,
     )
     id_column = "term_id" if args.entity == "terms" else "item_id"
-    pd.DataFrame({id_column: ids}).to_csv(output_dir / f"{args.entity}_ids.csv", index=False)
+    pd.DataFrame({id_column: ids}).to_csv(
+        output_dir / f"{args.entity}_ids.csv", index=False
+    )
     np.save(output_dir / f"{args.entity}_embeddings.npy", embeddings)
     manifest = {
         "entity": args.entity,
@@ -762,7 +1001,9 @@ def encode(args: argparse.Namespace) -> None:
         "checkpoint": str(Path(args.model_dir).resolve()),
         "checkpoint_config": config,
     }
-    (output_dir / f"{args.entity}_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (output_dir / f"{args.entity}_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
 
 
 def score_embedding_pairs(
@@ -779,8 +1020,16 @@ def score_embedding_pairs(
     for start in range(0, len(pairs), chunk_size):
         stop = min(start + chunk_size, len(pairs))
         chunk = pairs.iloc[start:stop]
-        query_index = np.fromiter((term_position[str(value)] for value in chunk["term_id"]), dtype=np.int64, count=len(chunk))
-        item_index = np.fromiter((item_position[str(value)] for value in chunk["item_id"]), dtype=np.int64, count=len(chunk))
+        query_index = np.fromiter(
+            (term_position[str(value)] for value in chunk["term_id"]),
+            dtype=np.int64,
+            count=len(chunk),
+        )
+        item_index = np.fromiter(
+            (item_position[str(value)] for value in chunk["item_id"]),
+            dtype=np.int64,
+            count=len(chunk),
+        )
         query = np.asarray(term_embeddings[query_index], dtype=np.float32)
         item = np.asarray(item_embeddings[item_index], dtype=np.float32)
         scores[start:stop] = np.einsum("ij,ij->i", query, item)
@@ -791,11 +1040,17 @@ def score_pairs(args: argparse.Namespace) -> None:
     started = time.time()
     data_dir = Path(args.data_dir)
     pair_path = Path(args.pairs) if args.pairs else data_dir / "submission_pairs.csv"
-    pairs = pd.read_csv(pair_path, dtype=str, keep_default_na=False, nrows=args.limit_pairs or None)
+    pairs = pd.read_csv(
+        pair_path, dtype=str, keep_default_na=False, nrows=args.limit_pairs or None
+    )
     required = {"term_id", "item_id"}
     if not required.issubset(pairs.columns):
-        raise ValueError(f"{pair_path} is missing {sorted(required - set(pairs.columns))}")
-    id_column = args.id_column or ("id" if "id" in pairs else "slate_id" if "slate_id" in pairs else "")
+        raise ValueError(
+            f"{pair_path} is missing {sorted(required - set(pairs.columns))}"
+        )
+    id_column = args.id_column or (
+        "id" if "id" in pairs else "slate_id" if "slate_id" in pairs else ""
+    )
     if not id_column:
         pairs["id"] = [f"PAIR_{index:010d}" for index in range(len(pairs))]
         id_column = "id"
@@ -812,21 +1067,44 @@ def score_pairs(args: argparse.Namespace) -> None:
     device = choose_device(torch_module, args.device)
     torch, _, tokenizer, model, config = load_checkpoint(Path(args.model_dir), device)
     term_embeddings = encode_batches(
-        term_ids, term_texts, tokenizer, model, "query", int(config["query_max_length"]),
-        args.encode_batch_size, device, torch, args.fp16,
+        term_ids,
+        term_texts,
+        tokenizer,
+        model,
+        "query",
+        int(config["query_max_length"]),
+        args.encode_batch_size,
+        device,
+        torch,
+        args.fp16,
     )
     item_embeddings = encode_batches(
-        item_ids, item_texts, tokenizer, model, "item", int(config["item_max_length"]),
-        args.encode_batch_size, device, torch, args.fp16,
+        item_ids,
+        item_texts,
+        tokenizer,
+        model,
+        "item",
+        int(config["item_max_length"]),
+        args.encode_batch_size,
+        device,
+        torch,
+        args.fp16,
     )
     scores = score_embedding_pairs(
-        pairs, term_ids, term_embeddings, item_ids, item_embeddings, args.pair_chunk_size
+        pairs,
+        term_ids,
+        term_embeddings,
+        item_ids,
+        item_embeddings,
+        args.pair_chunk_size,
     )
     output = pairs[[id_column, "term_id", "item_id"]].copy()
     output["semantic_cosine"] = scores
-    output["semantic_rank_pct"] = output.groupby("term_id", sort=False)["semantic_cosine"].rank(
-        method="average", pct=True
-    ).astype(np.float32)
+    output["semantic_rank_pct"] = (
+        output.groupby("term_id", sort=False)["semantic_cosine"]
+        .rank(method="average", pct=True)
+        .astype(np.float32)
+    )
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output.to_csv(output_path, index=False)
@@ -837,18 +1115,27 @@ def score_pairs(args: argparse.Namespace) -> None:
         "unique_items": len(item_ids),
         "elapsed_seconds": time.time() - started,
     }
-    output_path.with_suffix(".metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    output_path.with_suffix(".metrics.json").write_text(
+        json.dumps(metrics, indent=2), encoding="utf-8"
+    )
     print(json.dumps(metrics, indent=2))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Contrastive MiniLM two-tower training and pair scoring.")
+    parser = argparse.ArgumentParser(
+        description="Contrastive MiniLM two-tower training and pair scoring."
+    )
     sub = parser.add_subparsers(dest="operation", required=True)
 
     train_cmd = sub.add_parser("train")
     train_cmd.add_argument("--data-dir", default="data")
-    train_cmd.add_argument("--negative-pool", default="outputs/hybrid_embedding/contrastive_negative_pool.csv")
-    train_cmd.add_argument("--model-dir", default="outputs/hybrid_embedding/contrastive_model")
+    train_cmd.add_argument(
+        "--negative-pool",
+        default="outputs/hybrid_embedding/contrastive_negative_pool.csv",
+    )
+    train_cmd.add_argument(
+        "--model-dir", default="outputs/hybrid_embedding/contrastive_model"
+    )
     train_cmd.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     train_cmd.add_argument("--split-manifest")
     train_cmd.add_argument("--outer-fold", type=int, default=-1)
@@ -861,8 +1148,12 @@ def main() -> None:
     train_cmd.add_argument("--epochs", type=int, default=2)
     train_cmd.add_argument("--inner-valid-size", type=float, default=0.10)
     train_cmd.add_argument("--uniform-multiplier", type=int, default=3)
-    train_cmd.add_argument("--use-semi-hard", action=argparse.BooleanOptionalAction, default=True)
-    train_cmd.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True)
+    train_cmd.add_argument(
+        "--use-semi-hard", action=argparse.BooleanOptionalAction, default=True
+    )
+    train_cmd.add_argument(
+        "--fp16", action=argparse.BooleanOptionalAction, default=True
+    )
     train_cmd.add_argument("--learning-rate", type=float, default=2e-5)
     train_cmd.add_argument("--head-learning-rate", type=float, default=1e-4)
     train_cmd.add_argument("--weight-decay", type=float, default=0.01)
@@ -878,30 +1169,45 @@ def main() -> None:
         "--refit-full",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="After inner-term epoch selection, restart and refit that many epochs on all outer-training terms.",
+        help=(
+            "After inner-term epoch selection, restart and refit that many epochs "
+            "on all outer-training terms."
+        ),
     )
     train_cmd.set_defaults(func=train)
 
     encode_cmd = sub.add_parser("encode")
     encode_cmd.add_argument("--data-dir", default="data")
-    encode_cmd.add_argument("--model-dir", default="outputs/hybrid_embedding/contrastive_model")
-    encode_cmd.add_argument("--output-dir", default="outputs/hybrid_embedding/contrastive_embeddings")
+    encode_cmd.add_argument(
+        "--model-dir", default="outputs/hybrid_embedding/contrastive_model"
+    )
+    encode_cmd.add_argument(
+        "--output-dir", default="outputs/hybrid_embedding/contrastive_embeddings"
+    )
     encode_cmd.add_argument("--entity", choices=["terms", "items"], required=True)
     encode_cmd.add_argument("--batch-size", type=int, default=512)
     encode_cmd.add_argument("--device", default="auto")
-    encode_cmd.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True)
+    encode_cmd.add_argument(
+        "--fp16", action=argparse.BooleanOptionalAction, default=True
+    )
     encode_cmd.set_defaults(func=encode)
 
     score_cmd = sub.add_parser("score-pairs")
     score_cmd.add_argument("--data-dir", default="data")
-    score_cmd.add_argument("--model-dir", default="outputs/hybrid_embedding/contrastive_model")
+    score_cmd.add_argument(
+        "--model-dir", default="outputs/hybrid_embedding/contrastive_model"
+    )
     score_cmd.add_argument("--pairs")
     score_cmd.add_argument("--id-column")
-    score_cmd.add_argument("--output", default="outputs/hybrid_embedding/contrastive_submission_scores.csv")
+    score_cmd.add_argument(
+        "--output", default="outputs/hybrid_embedding/contrastive_submission_scores.csv"
+    )
     score_cmd.add_argument("--encode-batch-size", type=int, default=512)
     score_cmd.add_argument("--pair-chunk-size", type=int, default=200_000)
     score_cmd.add_argument("--device", default="auto")
-    score_cmd.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True)
+    score_cmd.add_argument(
+        "--fp16", action=argparse.BooleanOptionalAction, default=True
+    )
     score_cmd.add_argument("--limit-pairs", type=int, default=0)
     score_cmd.set_defaults(func=score_pairs)
 

@@ -1,3 +1,5 @@
+"""Build Turkish-aware lexical relevance features, scores, and submissions."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,7 +14,6 @@ import pandas as pd
 from rapidfuzz import fuzz
 from text_unidecode import unidecode
 from tqdm import tqdm
-
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -191,7 +192,9 @@ def load_items(path: Path) -> dict[str, tuple[str, str, str, str, str, str]]:
     return items
 
 
-def pair_features(term: dict[str, object], item: tuple[str, str, str, str, str, str]) -> dict[str, float]:
+def pair_features(
+    term: dict[str, object], item: tuple[str, str, str, str, str, str]
+) -> dict[str, float]:
     query = term["query"]  # type: ignore[index]
     q_tokens = term["tokens"]  # type: ignore[index]
     q_colors = term["colors"]  # type: ignore[index]
@@ -228,18 +231,28 @@ def pair_features(term: dict[str, object], item: tuple[str, str, str, str, str, 
 
     gender_mismatch = 0.0
     for gender_word, allowed in GENDER_ALLOWED.items():
-        if gender_word in q_tokens and gender not in allowed and gender_word not in full_tokens:
+        if (
+            gender_word in q_tokens
+            and gender not in allowed
+            and gender_word not in full_tokens
+        ):
             gender_mismatch = 1.0
             break
 
     age_mismatch = 0.0
     for age_word, allowed in AGE_ALLOWED.items():
-        if age_word in q_tokens and age_group not in allowed and age_word not in full_tokens:
+        if (
+            age_word in q_tokens
+            and age_group not in allowed
+            and age_word not in full_tokens
+        ):
             age_mismatch = 1.0
             break
 
     color_mismatch = float(bool(q_colors and full_tokens.isdisjoint(q_colors)))
-    weak_match = float(full_cov < 0.34 and max(title_ratio, category_ratio, brand_ratio) < 0.55)
+    weak_match = float(
+        full_cov < 0.34 and max(title_ratio, category_ratio, brand_ratio) < 0.55
+    )
 
     features = {
         "n_query_tokens": float(len(q_tokens)),
@@ -325,7 +338,9 @@ def lexical_score_from_features(features: dict[str, float]) -> float:
     return score
 
 
-def score_pair(term: dict[str, object], item: tuple[str, str, str, str, str, str]) -> float:
+def score_pair(
+    term: dict[str, object], item: tuple[str, str, str, str, str, str]
+) -> float:
     return pair_features(term, item)["lexical_score"]
 
 
@@ -354,15 +369,23 @@ def score_pairs(args: argparse.Namespace) -> None:
                 break
             item = items[row["item_id"]]
             term = terms[row["term_id"]]
-            writer.writerow([row["id"], row["term_id"], f"{score_pair(term, item):.6f}"])
+            writer.writerow(
+                [row["id"], row["term_id"], f"{score_pair(term, item):.6f}"]
+            )
 
 
 def summarize_scores(args: argparse.Namespace) -> None:
     scores = pd.read_csv(args.scores)
-    print(scores["score"].describe(percentiles=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]))
+    print(
+        scores["score"].describe(
+            percentiles=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+        )
+    )
     for threshold in args.thresholds:
         pred = scores["score"] >= threshold
-        print(f"threshold={threshold:.3f} positives={int(pred.sum())} rate={pred.mean():.5f}")
+        print(
+            f"threshold={threshold:.3f} positives={int(pred.sum())} rate={pred.mean():.5f}"
+        )
 
     by_term = scores.groupby("term_id")["score"].agg(["count", "max", "mean"])
     print(by_term.describe(percentiles=[0.01, 0.05, 0.5, 0.95, 0.99]))
@@ -378,12 +401,21 @@ def make_submission(args: argparse.Namespace) -> None:
         for _, group in tqdm(scores.groupby("term_id", sort=False), desc="terms"):
             group = group.copy()
             order = group["score"].sort_values(ascending=False).index
-            if args.min_per_term > 0 and group.loc[order[: args.min_per_term], "score"].max() >= args.min_score:
+            if (
+                args.min_per_term > 0
+                and group.loc[order[: args.min_per_term], "score"].max()
+                >= args.min_score
+            ):
                 group.loc[order[: args.min_per_term], "pred"] = 1
             if args.max_per_term > 0:
                 positives = group.index[group["pred"] == 1]
                 if len(positives) > args.max_per_term:
-                    keep = group.loc[positives].sort_values("score", ascending=False).head(args.max_per_term).index
+                    keep = (
+                        group.loc[positives]
+                        .sort_values("score", ascending=False)
+                        .head(args.max_per_term)
+                        .index
+                    )
                     group.loc[positives, "pred"] = 0
                     group.loc[keep, "pred"] = 1
             parts.append(group[["id", "pred"]])
@@ -398,7 +430,9 @@ def make_submission(args: argparse.Namespace) -> None:
     output.to_csv(args.output, index=False)
     counts = Counter(output["prediction"])
     print(f"wrote {args.output}")
-    print(f"rows={len(output)} positives={counts[1]} rate={counts[1] / len(output):.5f}")
+    print(
+        f"rows={len(output)} positives={counts[1]} rate={counts[1] / len(output):.5f}"
+    )
 
 
 def main() -> None:
@@ -414,7 +448,9 @@ def main() -> None:
 
     summary = sub.add_parser("summary")
     summary.add_argument("--scores", default="outputs/lexical_scores.csv")
-    summary.add_argument("--thresholds", type=float, nargs="+", default=[3.0, 3.5, 4.0, 4.5, 5.0])
+    summary.add_argument(
+        "--thresholds", type=float, nargs="+", default=[3.0, 3.5, 4.0, 4.5, 5.0]
+    )
     summary.set_defaults(func=summarize_scores)
 
     submit = sub.add_parser("submit")

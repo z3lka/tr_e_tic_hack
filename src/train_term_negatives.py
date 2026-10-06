@@ -1,3 +1,5 @@
+"""Mine deterministic TF-IDF negatives from training queries and catalog items."""
+
 from __future__ import annotations
 
 import argparse
@@ -19,17 +21,7 @@ def item_search_text(items: pd.DataFrame) -> pd.Series:
     brand = items["brand"].map(normalize_text)
     attrs = items["attributes"].map(normalize_text)
     return (
-        title
-        + " "
-        + title
-        + " "
-        + brand
-        + " "
-        + brand
-        + " "
-        + category
-        + " "
-        + attrs
+        title + " " + title + " " + brand + " " + brand + " " + category + " " + attrs
     ).str.strip()
 
 
@@ -101,15 +93,22 @@ def mine_negatives(args: argparse.Namespace) -> None:
     train_term_ids = positives["term_id"].drop_duplicates().to_numpy()
     if args.limit_terms:
         train_term_ids = train_term_ids[: args.limit_terms]
-        positives = positives.loc[positives["term_id"].isin(train_term_ids)].reset_index(drop=True)
+        positives = positives.loc[
+            positives["term_id"].isin(train_term_ids)
+        ].reset_index(drop=True)
     if args.limit_items:
         items = items.head(args.limit_items).reset_index(drop=True)
 
-    terms = terms.loc[terms["term_id"].isin(train_term_ids), ["term_id", "query"]].copy()
+    terms = terms.loc[
+        terms["term_id"].isin(train_term_ids), ["term_id", "query"]
+    ].copy()
     missing_terms = set(train_term_ids) - set(terms["term_id"])
     if missing_terms:
         examples = sorted(missing_terms)[:5]
-        raise KeyError(f"{len(missing_terms)} training term_ids are missing from terms.csv, examples={examples}")
+        raise KeyError(
+            f"{len(missing_terms)} training term_ids are missing from terms.csv, "
+            f"examples={examples}"
+        )
 
     terms["query_norm"] = terms["query"].map(normalize_text)
     terms = terms.set_index("term_id").loc[train_term_ids].reset_index()
@@ -118,7 +117,11 @@ def mine_negatives(args: argparse.Namespace) -> None:
 
     positive_by_term: dict[str, set[int]] = {}
     for term_id, group in positives.groupby("term_id", sort=False):
-        positions = {item_to_pos[item_id] for item_id in group["item_id"].astype(str) if item_id in item_to_pos}
+        positions = {
+            item_to_pos[item_id]
+            for item_id in group["item_id"].astype(str)
+            if item_id in item_to_pos
+        }
         positive_by_term[str(term_id)] = positions
 
     item_text = item_search_text(items)
@@ -150,15 +153,21 @@ def mine_negatives(args: argparse.Namespace) -> None:
         writer = csv.writer(handle)
         writer.writerow(["term_id", "item_id", "negative_band", "tfidf_score"])
 
-        for start in tqdm(range(0, len(terms), args.chunk_size), desc="mine train-term negatives"):
+        for start in tqdm(
+            range(0, len(terms), args.chunk_size), desc="mine train-term negatives"
+        ):
             stop = min(start + args.chunk_size, len(terms))
             scores = term_matrix[start:stop] @ item_matrix_t
             scores = scores.tocsr()
 
-            for row_offset, term_id in enumerate(terms["term_id"].iloc[start:stop].astype(str)):
+            for row_offset, term_id in enumerate(
+                terms["term_id"].iloc[start:stop].astype(str)
+            ):
                 pos_items = set(positive_by_term.get(term_id, set()))
                 excluded = set(pos_items)
-                row_indices, row_scores = topk_sparse_row(scores.getrow(row_offset), args.retrieve_topk)
+                row_indices, row_scores = topk_sparse_row(
+                    scores.getrow(row_offset), args.retrieve_topk
+                )
 
                 candidates: list[tuple[int, float]] = []
                 for item_pos, score in zip(row_indices, row_scores):
@@ -171,7 +180,9 @@ def mine_negatives(args: argparse.Namespace) -> None:
                 hard = candidates[: args.hard_per_term]
                 mid_pool = candidates[args.hard_per_term :]
                 if len(mid_pool) > args.mid_per_term:
-                    chosen = rng.choice(len(mid_pool), size=args.mid_per_term, replace=False)
+                    chosen = rng.choice(
+                        len(mid_pool), size=args.mid_per_term, replace=False
+                    )
                     mid = [mid_pool[int(i)] for i in chosen]
                 else:
                     mid = mid_pool
@@ -182,7 +193,9 @@ def mine_negatives(args: argparse.Namespace) -> None:
                 for item_pos, score in mid:
                     rows.append((term_id, item_ids[item_pos], "mid", score))
 
-                easy_positions = sample_easy_items(len(item_ids), excluded, args.easy_per_term, rng)
+                easy_positions = sample_easy_items(
+                    len(item_ids), excluded, args.easy_per_term, rng
+                )
                 for item_pos in easy_positions:
                     rows.append((term_id, item_ids[item_pos], "easy", 0.0))
 
@@ -194,7 +207,10 @@ def mine_negatives(args: argparse.Namespace) -> None:
                     total += 1
 
     print(f"wrote {output_path}")
-    print(f"negatives={total:,} hard={counts['hard']:,} mid={counts['mid']:,} easy={counts['easy']:,}")
+    print(
+        f"negatives={total:,} hard={counts['hard']:,} "
+        f"mid={counts['mid']:,} easy={counts['easy']:,}"
+    )
 
 
 def main() -> None:
@@ -210,8 +226,14 @@ def main() -> None:
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--word-ngram-max", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--limit-terms", type=int, help="Debug only: mine negatives for the first N train terms.")
-    parser.add_argument("--limit-items", type=int, help="Debug only: restrict the item catalog.")
+    parser.add_argument(
+        "--limit-terms",
+        type=int,
+        help="Debug only: mine negatives for the first N train terms.",
+    )
+    parser.add_argument(
+        "--limit-items", type=int, help="Debug only: restrict the item catalog."
+    )
     args = parser.parse_args()
     mine_negatives(args)
 

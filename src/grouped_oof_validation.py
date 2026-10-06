@@ -1,3 +1,5 @@
+"""Run leakage-aware term-grouped validation for tree and transformer models."""
+
 from __future__ import annotations
 
 import argparse
@@ -30,7 +32,6 @@ from pu_catboost import (
 from lexical_baseline import load_items, load_terms, normalize_text
 from train_term_negatives import item_search_text, topk_sparse_row
 
-
 SLATE_COLUMNS = [
     "slate_id",
     "term_id",
@@ -56,7 +57,12 @@ def load_positive_pairs(path: Path) -> pd.DataFrame:
 
 
 def make_term_folds(positives: pd.DataFrame, n_splits: int, seed: int) -> pd.DataFrame:
-    counts = positives.groupby("term_id", sort=True).size().rename("n_positives").reset_index()
+    counts = (
+        positives.groupby("term_id", sort=True)
+        .size()
+        .rename("n_positives")
+        .reset_index()
+    )
     if len(counts) < n_splits:
         raise ValueError(f"Need at least {n_splits} terms, found {len(counts)}")
 
@@ -119,7 +125,11 @@ def restrict_debug_catalog(
     required = set(positives["item_id"].astype(str))
     keep = items["item_id"].astype(str).isin(required)
     head_positions = np.arange(len(items)) < limit_items
-    restricted = items.loc[keep | head_positions].drop_duplicates("item_id").reset_index(drop=True)
+    restricted = (
+        items.loc[keep | head_positions]
+        .drop_duplicates("item_id")
+        .reset_index(drop=True)
+    )
     print(
         f"debug catalog restricted from {len(items):,} to {len(restricted):,}; "
         f"retained_positive_items={len(required):,}"
@@ -135,11 +145,15 @@ def build_slates(args: argparse.Namespace) -> None:
 
     positives = load_positive_pairs(data_dir / "training_pairs.csv")
     terms = pd.read_csv(data_dir / "terms.csv", dtype=str, keep_default_na=False)
-    train_terms = terms.loc[terms["term_id"].isin(set(positives["term_id"])), ["term_id", "query"]].copy()
+    train_terms = terms.loc[
+        terms["term_id"].isin(set(positives["term_id"])), ["term_id", "query"]
+    ].copy()
     train_terms = train_terms.sort_values("term_id").reset_index(drop=True)
     if args.limit_terms:
         train_terms = train_terms.head(args.limit_terms).copy()
-        positives = positives.loc[positives["term_id"].isin(set(train_terms["term_id"]))].reset_index(drop=True)
+        positives = positives.loc[
+            positives["term_id"].isin(set(train_terms["term_id"]))
+        ].reset_index(drop=True)
 
     missing_terms = set(positives["term_id"]) - set(train_terms["term_id"])
     if missing_terms:
@@ -191,7 +205,9 @@ def build_slates(args: argparse.Namespace) -> None:
 
     positives_by_term: dict[str, list[int]] = {}
     for term_id, group in positives.groupby("term_id", sort=False):
-        positives_by_term[str(term_id)] = [item_to_position[item_id] for item_id in group["item_id"].astype(str)]
+        positives_by_term[str(term_id)] = [
+            item_to_position[item_id] for item_id in group["item_id"].astype(str)
+        ]
 
     slate_path = output_dir / "validation_slates.csv"
     rng = np.random.default_rng(args.seed)
@@ -204,14 +220,24 @@ def build_slates(args: argparse.Namespace) -> None:
         writer = csv.writer(handle)
         writer.writerow(SLATE_COLUMNS)
 
-        for start in tqdm(range(0, len(train_terms), args.chunk_size), desc="build validation slates"):
+        for start in tqdm(
+            range(0, len(train_terms), args.chunk_size), desc="build validation slates"
+        ):
             stop = min(start + args.chunk_size, len(train_terms))
             score_chunk = (term_matrix[start:stop] @ item_matrix_t).tocsr()
 
-            for row_offset, term_id in enumerate(train_terms["term_id"].iloc[start:stop].astype(str)):
-                indices, scores = topk_sparse_row(score_chunk.getrow(row_offset), args.base_candidates)
-                retrieved_positions = [int(value) for value in indices[: args.base_candidates]]
-                retrieved_scores = [float(value) for value in scores[: args.base_candidates]]
+            for row_offset, term_id in enumerate(
+                train_terms["term_id"].iloc[start:stop].astype(str)
+            ):
+                indices, scores = topk_sparse_row(
+                    score_chunk.getrow(row_offset), args.base_candidates
+                )
+                retrieved_positions = [
+                    int(value) for value in indices[: args.base_candidates]
+                ]
+                retrieved_scores = [
+                    float(value) for value in scores[: args.base_candidates]
+                ]
                 selected = set(retrieved_positions)
                 missing = args.base_candidates - len(retrieved_positions)
                 if missing:
@@ -256,7 +282,9 @@ def build_slates(args: argparse.Namespace) -> None:
                     rows_by_fold[fold] += 1
 
     if positive_rows != len(positives):
-        raise AssertionError(f"Expected {len(positives):,} positive slate rows, wrote {positive_rows:,}")
+        raise AssertionError(
+            f"Expected {len(positives):,} positive slate rows, wrote {positive_rows:,}"
+        )
 
     summary = {
         "n_splits": args.n_splits,
@@ -274,7 +302,9 @@ def build_slates(args: argparse.Namespace) -> None:
         "rows_by_fold": rows_by_fold.tolist(),
         "elapsed_minutes": (time.time() - started) / 60.0,
     }
-    (output_dir / "slate_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (output_dir / "slate_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
     print(json.dumps(summary, indent=2))
     print(f"wrote {folds_path}")
     print(f"wrote {slate_path}")
@@ -289,10 +319,22 @@ def sample_rows(frame: pd.DataFrame, maximum: int, seed: int) -> pd.DataFrame:
     n_positive = min(len(positive), max(1, int(round(maximum * positive_share))))
     n_negative = min(len(negative), maximum - n_positive)
     parts = [
-        positive.sample(n=n_positive, random_state=seed) if len(positive) > n_positive else positive,
-        negative.sample(n=n_negative, random_state=seed + 1) if len(negative) > n_negative else negative,
+        (
+            positive.sample(n=n_positive, random_state=seed)
+            if len(positive) > n_positive
+            else positive
+        ),
+        (
+            negative.sample(n=n_negative, random_state=seed + 1)
+            if len(negative) > n_negative
+            else negative
+        ),
     ]
-    return pd.concat(parts, ignore_index=True).sample(frac=1.0, random_state=seed + 2).reset_index(drop=True)
+    return (
+        pd.concat(parts, ignore_index=True)
+        .sample(frac=1.0, random_state=seed + 2)
+        .reset_index(drop=True)
+    )
 
 
 def fit_category_signal_for_fold(
@@ -302,10 +344,22 @@ def fit_category_signal_for_fold(
     slate_term_ids: set[str],
     args: argparse.Namespace,
 ) -> pd.DataFrame:
-    terms = pd.read_csv(data_dir / "terms.csv", dtype=str, keep_default_na=False, usecols=["term_id", "query"])
-    items = pd.read_csv(data_dir / "items.csv", dtype=str, keep_default_na=False, usecols=["item_id", "category"])
+    terms = pd.read_csv(
+        data_dir / "terms.csv",
+        dtype=str,
+        keep_default_na=False,
+        usecols=["term_id", "query"],
+    )
+    items = pd.read_csv(
+        data_dir / "items.csv",
+        dtype=str,
+        keep_default_na=False,
+        usecols=["item_id", "category"],
+    )
     positives = load_positive_pairs(data_dir / "training_pairs.csv")
-    positives = positives.loc[positives["term_id"].isin(train_term_ids)].reset_index(drop=True)
+    positives = positives.loc[positives["term_id"].isin(train_term_ids)].reset_index(
+        drop=True
+    )
     examples = build_category_examples(
         terms,
         items,
@@ -320,7 +374,9 @@ def fit_category_signal_for_fold(
         min_class_count=args.category_min_class_count,
         seed=args.seed,
     ).fit(examples)
-    prediction_terms = terms.loc[terms["term_id"].isin(slate_term_ids), ["term_id", "query"]].copy()
+    prediction_terms = terms.loc[
+        terms["term_id"].isin(slate_term_ids), ["term_id", "query"]
+    ].copy()
     topk = signal.predict_terms(prediction_terms, chunk_size=args.category_chunk_size)
     topk_path = output_dir / "term_category_topk.csv"
     topk.to_csv(topk_path, index=False)
@@ -407,12 +463,18 @@ def train_lgbm(
     fit_kwargs: dict[str, object] = {"callbacks": callbacks}
     if x_inner_valid is not None and y_inner_valid is not None:
         if args.early_stopping_rounds > 0:
-            callbacks.append(lgb.early_stopping(args.early_stopping_rounds, verbose=True))
+            callbacks.append(
+                lgb.early_stopping(args.early_stopping_rounds, verbose=True)
+            )
         fit_kwargs["eval_set"] = [(x_inner_valid[numeric_features], y_inner_valid)]
         fit_kwargs["eval_metric"] = "binary_logloss"
     model.fit(x_fit[numeric_features], y_fit, **fit_kwargs)
-    probability = model.predict_proba(x_score[numeric_features])[:, 1].astype(np.float32)
-    joblib.dump({"model": model, "features": numeric_features}, output_dir / "lgbm.joblib")
+    probability = model.predict_proba(x_score[numeric_features])[:, 1].astype(
+        np.float32
+    )
+    joblib.dump(
+        {"model": model, "features": numeric_features}, output_dir / "lgbm.joblib"
+    )
     return model, probability
 
 
@@ -429,7 +491,9 @@ def inner_group_split(
     fit_index, inner_valid_index = next(
         splitter.split(rows, rows["label"], groups=rows["term_id"])
     )
-    if set(rows.iloc[fit_index]["term_id"]) & set(rows.iloc[inner_valid_index]["term_id"]):
+    if set(rows.iloc[fit_index]["term_id"]) & set(
+        rows.iloc[inner_valid_index]["term_id"]
+    ):
         raise AssertionError("Term leakage across inner early-stopping split")
     return fit_index, inner_valid_index
 
@@ -451,22 +515,37 @@ def run_fold(args: argparse.Namespace, fold: int | None = None) -> Path:
     missing = required - set(slates.columns)
     if missing:
         raise ValueError(f"Slate file is missing columns: {sorted(missing)}")
-    for column in ["fold", "label", "candidate_count", "is_retrieved", "retrieval_rank"]:
+    for column in [
+        "fold",
+        "label",
+        "candidate_count",
+        "is_retrieved",
+        "retrieval_rank",
+    ]:
         slates[column] = pd.to_numeric(slates[column], errors="raise").astype(np.int32)
-    slates["retrieval_score"] = pd.to_numeric(slates["retrieval_score"], errors="raise").astype(np.float32)
+    slates["retrieval_score"] = pd.to_numeric(
+        slates["retrieval_score"], errors="raise"
+    ).astype(np.float32)
 
     available_folds = sorted(slates["fold"].unique().tolist())
     if selected_fold not in available_folds:
-        raise ValueError(f"fold={selected_fold} not present; available={available_folds}")
+        raise ValueError(
+            f"fold={selected_fold} not present; available={available_folds}"
+        )
     train_rows = slates.loc[slates["fold"].ne(selected_fold)].copy()
     valid_rows = slates.loc[slates["fold"].eq(selected_fold)].copy()
-    train_rows = sample_rows(train_rows, args.max_train_rows, args.seed + selected_fold * 10)
-    valid_rows = sample_rows(valid_rows, args.max_valid_rows, args.seed + selected_fold * 10 + 1)
+    train_rows = sample_rows(
+        train_rows, args.max_train_rows, args.seed + selected_fold * 10
+    )
+    valid_rows = sample_rows(
+        valid_rows, args.max_valid_rows, args.seed + selected_fold * 10 + 1
+    )
     if train_rows.empty or valid_rows.empty:
         raise ValueError("Fold split produced empty training or validation rows")
     print(
         f"fold={selected_fold} train_rows={len(train_rows):,} valid_rows={len(valid_rows):,} "
-        f"train_terms={train_rows['term_id'].nunique():,} valid_terms={valid_rows['term_id'].nunique():,}"
+        f"train_terms={train_rows['term_id'].nunique():,} "
+        f"valid_terms={valid_rows['term_id'].nunique():,}"
     )
 
     train_term_ids = set(train_rows["term_id"].astype(str))
@@ -507,8 +586,12 @@ def run_fold(args: argparse.Namespace, fold: int | None = None) -> Path:
             if feature in train_rows.columns and feature in valid_rows.columns
         ]
         for feature in semantic_features:
-            x_train[feature] = pd.to_numeric(train_rows[feature], errors="raise").to_numpy(dtype=np.float32)
-            x_valid[feature] = pd.to_numeric(valid_rows[feature], errors="raise").to_numpy(dtype=np.float32)
+            x_train[feature] = pd.to_numeric(
+                train_rows[feature], errors="raise"
+            ).to_numpy(dtype=np.float32)
+            x_valid[feature] = pd.to_numeric(
+                valid_rows[feature], errors="raise"
+            ).to_numpy(dtype=np.float32)
         if not semantic_features:
             print("semantic features requested, but the slate contains none")
     y_train = train_rows["label"].to_numpy(dtype=np.int8)
@@ -575,7 +658,9 @@ def run_fold(args: argparse.Namespace, fold: int | None = None) -> Path:
         "valid_positive_rate": float(y_valid.mean()),
         "elapsed_minutes": (time.time() - started) / 60.0,
     }
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
     print(json.dumps(metadata, indent=2))
     print(f"wrote {score_path}")
 
@@ -584,21 +669,27 @@ def run_fold(args: argparse.Namespace, fold: int | None = None) -> Path:
     return score_path
 
 
-def combine_fold_scores(output_dir: Path, n_splits: int, output: Path | None = None) -> Path:
+def combine_fold_scores(
+    output_dir: Path, n_splits: int, output: Path | None = None
+) -> Path:
     paths = [output_dir / f"fold_{fold}" / "oof_scores.csv" for fold in range(n_splits)]
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
         raise FileNotFoundError(f"Missing fold score files: {missing}")
     frames: list[pd.DataFrame] = []
     for fold, path in enumerate(paths):
-        frame = pd.read_csv(path, dtype={"slate_id": str, "term_id": str, "item_id": str})
+        frame = pd.read_csv(
+            path, dtype={"slate_id": str, "term_id": str, "item_id": str}
+        )
         transformer_path = output_dir / f"fold_{fold}" / "transformer_oof_scores.csv"
         if transformer_path.exists():
             transformer = pd.read_csv(transformer_path, dtype={"slate_id": str})
             required = {"slate_id", "transformer_prob"}
             missing_columns = required - set(transformer.columns)
             if missing_columns:
-                raise ValueError(f"{transformer_path} is missing {sorted(missing_columns)}")
+                raise ValueError(
+                    f"{transformer_path} is missing {sorted(missing_columns)}"
+                )
             frame = frame.merge(
                 transformer[["slate_id", "transformer_prob"]],
                 on="slate_id",
@@ -606,11 +697,15 @@ def combine_fold_scores(output_dir: Path, n_splits: int, output: Path | None = N
                 validate="one_to_one",
             )
             if frame["transformer_prob"].isna().any():
-                raise ValueError(f"{transformer_path} does not cover every row in fold {fold}")
+                raise ValueError(
+                    f"{transformer_path} does not cover every row in fold {fold}"
+                )
         frames.append(frame)
     combined = pd.concat(frames, ignore_index=True)
     if combined["slate_id"].duplicated().any():
-        examples = combined.loc[combined["slate_id"].duplicated(), "slate_id"].head().tolist()
+        examples = (
+            combined.loc[combined["slate_id"].duplicated(), "slate_id"].head().tolist()
+        )
         raise ValueError(f"Duplicate OOF slate ids, examples={examples}")
     combined = combined.sort_values("slate_id").reset_index(drop=True)
     output_path = output or output_dir / "oof_scores.csv"
@@ -630,10 +725,16 @@ def simplex_weights(n_components: int, step: float) -> Iterable[tuple[float, ...
         raise ValueError("At least one score component is required")
     units = int(round(1.0 / step))
     if units <= 0 or not np.isclose(units * step, 1.0, atol=1e-8):
-        raise ValueError("weight-step must divide 1.0 exactly, for example 0.25, 0.20, or 0.10")
-    for separators in itertools.combinations(range(units + n_components - 1), n_components - 1):
+        raise ValueError(
+            "weight-step must divide 1.0 exactly, for example 0.25, 0.20, or 0.10"
+        )
+    for separators in itertools.combinations(
+        range(units + n_components - 1), n_components - 1
+    ):
         boundaries = (-1,) + separators + (units + n_components - 1,)
-        counts = tuple(boundaries[i + 1] - boundaries[i] - 1 for i in range(n_components))
+        counts = tuple(
+            boundaries[i + 1] - boundaries[i] - 1 for i in range(n_components)
+        )
         yield tuple(count / units for count in counts)
 
 
@@ -659,7 +760,9 @@ def evaluate_rates(
         frame = pd.DataFrame({"term_id": term_ids, "score": scores})
         group_size = frame.groupby("term_id", sort=False)["score"].transform("size")
         minimum = (group_size - constraint_base).clip(lower=0)
-        rank = frame.groupby("term_id", sort=False)["score"].rank(method="first", ascending=False)
+        rank = frame.groupby("term_id", sort=False)["score"].rank(
+            method="first", ascending=False
+        )
         mandatory = rank.le(minimum).to_numpy()
 
     mandatory_count = int(mandatory.sum())
@@ -694,7 +797,9 @@ def merge_extra_scores(frame: pd.DataFrame, paths: list[str]) -> pd.DataFrame:
         value_columns = [column for column in extra.columns if column != "slate_id"]
         duplicates = set(value_columns) & set(merged.columns)
         if duplicates:
-            raise ValueError(f"{path} duplicates existing columns: {sorted(duplicates)}")
+            raise ValueError(
+                f"{path} duplicates existing columns: {sorted(duplicates)}"
+            )
         merged = merged.merge(extra, on="slate_id", how="left", validate="one_to_one")
         if merged[value_columns].isna().any().any():
             raise ValueError(f"{path} does not cover every OOF slate_id")
@@ -731,8 +836,12 @@ def optimize(args: argparse.Namespace) -> None:
     for component in components:
         numeric = pd.to_numeric(frame[component], errors="coerce")
         if numeric.isna().any():
-            raise ValueError(f"Component {component} contains missing/non-numeric values")
-        fold_rank = numeric.groupby(frame["fold"], sort=False).rank(method="average", pct=True)
+            raise ValueError(
+                f"Component {component} contains missing/non-numeric values"
+            )
+        fold_rank = numeric.groupby(frame["fold"], sort=False).rank(
+            method="average", pct=True
+        )
         rank_columns.append(fold_rank.to_numpy(dtype=np.float32))
 
     labels = frame["label"].to_numpy(dtype=np.int8)
@@ -769,7 +878,11 @@ def optimize(args: argparse.Namespace) -> None:
                     row[f"weight_{component}"] = weight
                 results.append(row)
 
-    result_frame = pd.DataFrame(results).sort_values("macro_f1", ascending=False).reset_index(drop=True)
+    result_frame = (
+        pd.DataFrame(results)
+        .sort_values("macro_f1", ascending=False)
+        .reset_index(drop=True)
+    )
     result_path = output_dir / "oof_optimization.csv"
     result_frame.to_csv(result_path, index=False)
     best = result_frame.iloc[0].to_dict()
@@ -791,9 +904,18 @@ def add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--output-dir", default="outputs/grouped_oof")
     parser.add_argument("--slates")
-    parser.add_argument("--models", nargs="+", choices=["catboost", "lgbm"], default=["catboost", "lgbm"])
-    parser.add_argument("--max-train-rows", type=int, default=0, help="Debug only; 0 uses all rows.")
-    parser.add_argument("--max-valid-rows", type=int, default=0, help="Debug only; 0 uses all rows.")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=["catboost", "lgbm"],
+        default=["catboost", "lgbm"],
+    )
+    parser.add_argument(
+        "--max-train-rows", type=int, default=0, help="Debug only; 0 uses all rows."
+    )
+    parser.add_argument(
+        "--max-valid-rows", type=int, default=0, help="Debug only; 0 uses all rows."
+    )
     parser.add_argument("--category-topk", type=int, default=5)
     parser.add_argument("--category-max-examples", type=int, default=0)
     parser.add_argument("--category-max-features", type=int, default=120_000)
@@ -809,7 +931,10 @@ def add_training_arguments(parser: argparse.ArgumentParser) -> None:
         "--inner-valid-size",
         type=float,
         default=0.10,
-        help="Fraction of outer-training terms reserved for early stopping; outer fold labels are never used.",
+        help=(
+            "Fraction of outer-training terms reserved for early stopping; "
+            "outer fold labels are never used."
+        ),
     )
     parser.add_argument("--catboost-iterations", type=int, default=2_000)
     parser.add_argument("--catboost-learning-rate", type=float, default=0.035)
@@ -830,7 +955,10 @@ def add_training_arguments(parser: argparse.ArgumentParser) -> None:
         "--semantic-features",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use semantic_cosine/semantic_rank_pct when those optional columns exist in the slate.",
+        help=(
+            "Use semantic_cosine/semantic_rank_pct when those optional columns "
+            "exist in the slate."
+        ),
     )
 
 
@@ -877,7 +1005,9 @@ def main() -> None:
     )
 
     optimize_parser = subparsers.add_parser("optimize")
-    optimize_parser.add_argument("--oof-scores", default="outputs/grouped_oof/oof_scores.csv")
+    optimize_parser.add_argument(
+        "--oof-scores", default="outputs/grouped_oof/oof_scores.csv"
+    )
     optimize_parser.add_argument("--output-dir", default="outputs/grouped_oof")
     optimize_parser.add_argument("--extra-scores", nargs="*", default=[])
     optimize_parser.add_argument("--components", nargs="*")
@@ -888,7 +1018,9 @@ def main() -> None:
         type=float,
         default=[round(value, 3) for value in np.arange(0.15, 0.351, 0.005)],
     )
-    optimize_parser.add_argument("--constraint-bases", nargs="+", type=int, default=[0, 100])
+    optimize_parser.add_argument(
+        "--constraint-bases", nargs="+", type=int, default=[0, 100]
+    )
     optimize_parser.add_argument("--show-top", type=int, default=20)
     optimize_parser.set_defaults(func=optimize)
 

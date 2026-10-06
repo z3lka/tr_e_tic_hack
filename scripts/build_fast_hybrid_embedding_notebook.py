@@ -1,8 +1,9 @@
+"""Generate the self-contained Kaggle notebook for hybrid embedding retrieval."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "notebooks" / "fast_hybrid_embedding_retrieval_kaggle.ipynb"
@@ -21,10 +22,18 @@ MODULES = [
 
 
 def markdown(source: str) -> dict[str, object]:
-    return {"cell_type": "markdown", "metadata": {}, "source": source.splitlines(keepends=True)}
+    """Create a markdown cell from a plain string."""
+
+    return {
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": source.splitlines(keepends=True),
+    }
 
 
 def code(source: str) -> dict[str, object]:
+    """Create an unexecuted code cell from Python source."""
+
     return {
         "cell_type": "code",
         "execution_count": None,
@@ -35,25 +44,36 @@ def code(source: str) -> dict[str, object]:
 
 
 def module_cell(filename: str) -> dict[str, object]:
+    """Embed one repository module as a Kaggle writefile cell."""
+
     source = (ROOT / "src" / filename).read_text(encoding="utf-8")
     return code(f"%%writefile src/{filename}\n{source}")
 
 
 cells: list[dict[str, object]] = [
-    markdown(
-        """# Fast hybrid embedding retrieval and negative sampling
+    markdown("""# Fast hybrid embedding retrieval and negative sampling
 
-This standalone Kaggle notebook implements the fast embedding workflow as a contrastive shared-encoder two-tower model. It caches frozen multilingual MiniLM catalog embeddings and exact top-500 retrieval once, mixes representative random negatives with conservative lexical/embedding semi-hard negatives, and keeps checkpoint selection term-grouped and separate from the outer holdout.
+This standalone Kaggle notebook implements the fast embedding workflow as a
+contrastive shared-encoder two-tower model. It caches frozen multilingual MiniLM
+catalog embeddings and exact top-500 retrieval once, mixes representative random
+negatives with conservative lexical/embedding semi-hard negatives, and keeps
+checkpoint selection term-grouped and separate from the outer holdout.
 
-The default `MODE="pilot"` uses a fixed stratified 80/20 term holdout. After selecting a recipe by Macro-F1 (Recall@100 breaks ties), use `MODE="confirm"` to run five grouped folds for only that pilot recipe. Use `MODE="final"` with the confirmed blend JSON to train on all positive terms, score every submission pair by encoding each unique query/item once, and write a validated submission.
+The default `MODE="pilot"` uses a fixed stratified 80/20 term holdout. After
+selecting a recipe by Macro-F1 (Recall@100 breaks ties), use `MODE="confirm"` to
+run five grouped folds for only that pilot recipe. Use `MODE="final"` with the
+confirmed blend JSON to train on all positive terms, score every submission pair
+by encoding each unique query/item once, and write a validated submission.
 
-All long stages are resumable. Save the packaged artifact archive or the output directory as a Kaggle dataset between sessions. The original `grouped_5fold_oof_kaggle.ipynb` is not used or modified.
+All long stages are resumable. Save the packaged artifact archive or the output
+directory as a Kaggle dataset between sessions. The original
+`grouped_5fold_oof_kaggle.ipynb` is not used or modified.
 
-The negative mix follows the representative-random plus conservative semi-hard pattern supported by [Facebook's retrieval study](https://ar5iv.labs.arxiv.org/html/2006.11632) and [JD's e-commerce model](https://ar5iv.labs.arxiv.org/html/2006.02282).
-"""
-    ),
-    code(
-        '''from pathlib import Path
+The negative mix follows the representative-random plus conservative semi-hard
+pattern supported by [Facebook's retrieval study](https://ar5iv.labs.arxiv.org/html/2006.11632)
+and [JD's e-commerce model](https://ar5iv.labs.arxiv.org/html/2006.02282).
+"""),
+    code("""from pathlib import Path
 import importlib.util
 import json
 import os
@@ -114,28 +134,39 @@ DATA_DIR = next((path for path in data_candidates if (path / "training_pairs.csv
 if DATA_DIR is None:
     matches = list(Path("/kaggle/input").glob("**/training_pairs.csv"))
     if len(matches) != 1:
-        raise FileNotFoundError(f"Could not uniquely locate competition data; matches={matches[:10]}")
+        raise FileNotFoundError(
+            f"Could not uniquely locate competition data; matches={matches[:10]}"
+        )
     DATA_DIR = matches[0].parent
 
 print(f"MODE={MODE} DATA_DIR={DATA_DIR} RUN_DIR={RUN_DIR}")
-'''
-    ),
+"""),
     markdown("## Runtime dependencies"),
-    code(
-        '''required = {
-    "numpy": "numpy", "pandas": "pandas", "scipy": "scipy", "sklearn": "scikit-learn",
-    "joblib": "joblib", "tqdm": "tqdm", "torch": "torch", "transformers": "transformers",
-    "lightgbm": "lightgbm", "catboost": "catboost", "rapidfuzz": "rapidfuzz",
+    code("""required = {
+    "numpy": "numpy",
+    "pandas": "pandas",
+    "scipy": "scipy",
+    "sklearn": "scikit-learn",
+    "joblib": "joblib",
+    "tqdm": "tqdm",
+    "torch": "torch",
+    "transformers": "transformers",
+    "lightgbm": "lightgbm",
+    "catboost": "catboost",
+    "rapidfuzz": "rapidfuzz",
     "text_unidecode": "text-unidecode",
 }
-missing = [package for module, package in required.items() if importlib.util.find_spec(module) is None]
+missing = [
+    package
+    for module, package in required.items()
+    if importlib.util.find_spec(module) is None
+]
 if missing:
     print("installing", missing)
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", *missing], check=True)
 else:
     print("all dependencies are available")
-'''
-    ),
+"""),
     markdown("## Embedded source modules"),
 ]
 
@@ -144,8 +175,7 @@ for module in MODULES:
 
 cells.extend(
     [
-        code(
-            '''sys.path.insert(0, str(SRC_DIR))
+        code("""sys.path.insert(0, str(SRC_DIR))
 ENV = os.environ.copy()
 ENV["PYTHONPATH"] = str(SRC_DIR)
 ENV.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -159,11 +189,9 @@ def run_command(arguments):
 
 run_command([SRC_DIR / "hybrid_embedding_retrieval.py", "--help"])
 run_command([SRC_DIR / "contrastive_biencoder.py", "--help"])
-'''
-        ),
+"""),
         markdown("## 1. Frozen MiniLM cache and exact hybrid retrieval"),
-        code(
-            '''cache_manifest = CACHE_DIR / "manifest.json"
+        code("""cache_manifest = CACHE_DIR / "manifest.json"
 run_command([
     SRC_DIR / "hybrid_embedding_retrieval.py", "build-cache",
     "--data-dir", DATA_DIR, "--cache-dir", CACHE_DIR,
@@ -173,17 +201,19 @@ run_command([
 ])
 
 display(json.loads(cache_manifest.read_text()))
-'''
-        ),
+"""),
         markdown("## 2. Conservative hybrid negative files"),
-        code(
-            '''contrastive_negative_pool = ROOT_OUT / "contrastive_negative_pool.csv"
+        code("""contrastive_negative_pool = ROOT_OUT / "contrastive_negative_pool.csv"
 reranker_negatives = ROOT_OUT / "reranker_negatives.csv"
 cache_key = json.loads(cache_manifest.read_text())["cache_key"]
 
 def negative_cache_matches(path):
     audit = path.with_suffix(".audit.json")
-    return path.exists() and audit.exists() and json.loads(audit.read_text()).get("cache_fingerprint") == cache_key
+    return (
+        path.exists()
+        and audit.exists()
+        and json.loads(audit.read_text()).get("cache_fingerprint") == cache_key
+    )
 
 if not SKIP_EXISTING or not negative_cache_matches(contrastive_negative_pool):
     run_command([
@@ -200,11 +230,9 @@ if not SKIP_EXISTING or not negative_cache_matches(reranker_negatives):
 
 display(json.loads(contrastive_negative_pool.with_suffix(".audit.json").read_text()))
 display(json.loads(reranker_negatives.with_suffix(".audit.json").read_text()))
-'''
-        ),
+"""),
         markdown("## 3. Fixed pilot or five-fold hybrid validation slates"),
-        code(
-            '''slate_path = RUN_DIR / "hybrid_validation_slates.csv"
+        code("""slate_path = RUN_DIR / "hybrid_validation_slates.csv"
 split_manifest = RUN_DIR / "split_manifest.csv"
 retrieval_metrics = RUN_DIR / "retrieval_metrics.json"
 if MODE in {"pilot", "confirm"}:
@@ -221,11 +249,9 @@ if MODE in {"pilot", "confirm"}:
     display(json.loads(retrieval_metrics.read_text()))
 else:
     print("final mode uses submission_pairs.csv; no outer validation slate is built")
-'''
-        ),
+"""),
         markdown("## 4. Current GBDT baseline on the identical split"),
-        code(
-            '''baseline_scores = RUN_DIR / "baseline_oof_scores.csv"
+        code("""baseline_scores = RUN_DIR / "baseline_oof_scores.csv"
 if MODE in {"pilot", "confirm"} and RUN_GBDT:
     folds = [0] if MODE == "pilot" else list(range(5))
     gbdt_root = RUN_DIR / "gbdt"
@@ -252,13 +278,18 @@ if MODE in {"pilot", "confirm"} and RUN_GBDT:
         ])
 elif MODE in {"pilot", "confirm"}:
     raise ValueError("Set RUN_GBDT=True or provide baseline_oof_scores.csv in RUN_DIR")
-'''
-        ),
+"""),
         markdown("## 5. Contrastive checkpoints and held-out scores"),
-        code(
-            '''import pandas as pd
+        code("""import pandas as pd
 
-slates = pd.read_csv(slate_path, dtype={"slate_id": str, "term_id": str, "item_id": str}) if MODE != "final" else None
+slates = (
+    pd.read_csv(
+        slate_path,
+        dtype={"slate_id": str, "term_id": str, "item_id": str},
+    )
+    if MODE != "final"
+    else None
+)
 
 def train_and_score(label, use_semi_hard, fold):
     model_dir = RUN_DIR / "models" / label / f"fold_{fold}"
@@ -318,27 +349,35 @@ elif MODE == "confirm":
         models_for_recall[f"fold_{fold}"] = model
     if fold_scores:
         combined_path = RUN_DIR / "scores" / f"{winning_recipe}_oof.csv"
-        pd.concat(fold_scores, ignore_index=True).sort_values("slate_id").to_csv(combined_path, index=False)
-        if winning_recipe == "contrastive_cosine_feature": contrastive_scores = combined_path
-        else: hybrid_scores = combined_path
-'''
-        ),
+        pd.concat(fold_scores, ignore_index=True).sort_values("slate_id").to_csv(
+            combined_path, index=False
+        )
+        if winning_recipe == "contrastive_cosine_feature":
+            contrastive_scores = combined_path
+        else:
+            hybrid_scores = combined_path
+"""),
         markdown("## 6. Retrieval Recall@100 for checkpoint tie-breaking"),
-        code(
-            '''from hybrid_embedding_retrieval import cache_paths, exact_cosine_topk
+        code("""from hybrid_embedding_retrieval import cache_paths, exact_cosine_topk
 
 def checkpoint_recall_at_100(label, model_dir, heldout_fold=0):
     embedding_dir = RUN_DIR / "encoded" / label
     term_file = embedding_dir / "terms_embeddings.npy"
     item_file = embedding_dir / "items_embeddings.npy"
     if not SKIP_EXISTING or not term_file.exists():
-        run_command([SRC_DIR / "contrastive_biencoder.py", "encode", "--data-dir", DATA_DIR,
-                     "--model-dir", model_dir, "--output-dir", embedding_dir,
-                     "--entity", "terms", "--batch-size", ENCODE_BATCH_SIZE, "--device", DEVICE, "--fp16"])
+        run_command([
+            SRC_DIR / "contrastive_biencoder.py", "encode",
+            "--data-dir", DATA_DIR, "--model-dir", model_dir,
+            "--output-dir", embedding_dir, "--entity", "terms",
+            "--batch-size", ENCODE_BATCH_SIZE, "--device", DEVICE, "--fp16",
+        ])
     if not SKIP_EXISTING or not item_file.exists():
-        run_command([SRC_DIR / "contrastive_biencoder.py", "encode", "--data-dir", DATA_DIR,
-                     "--model-dir", model_dir, "--output-dir", embedding_dir,
-                     "--entity", "items", "--batch-size", ENCODE_BATCH_SIZE, "--device", DEVICE, "--fp16"])
+        run_command([
+            SRC_DIR / "contrastive_biencoder.py", "encode",
+            "--data-dir", DATA_DIR, "--model-dir", model_dir,
+            "--output-dir", embedding_dir, "--entity", "items",
+            "--batch-size", ENCODE_BATCH_SIZE, "--device", DEVICE, "--fp16",
+        ])
     term_ids = pd.read_csv(embedding_dir / "terms_ids.csv", dtype=str)["term_id"].tolist()
     item_ids = pd.read_csv(embedding_dir / "items_ids.csv", dtype=str)["item_id"].tolist()
     term_pos = {value: index for index, value in enumerate(term_ids)}
@@ -352,27 +391,39 @@ def checkpoint_recall_at_100(label, model_dir, heldout_fold=0):
     term_embedding = __import__("numpy").load(term_file, mmap_mode="r")[q_rows]
     item_embedding = __import__("numpy").load(item_file, mmap_mode="r")
     indices, _ = exact_cosine_topk(term_embedding, item_embedding, 100, device=DEVICE)
-    retrieved = {term: {item_ids[position] for position in indices[row]} for row, term in enumerate(q_ids)}
-    hits = sum(str(row.item_id) in retrieved[str(row.term_id)] for row in positives.itertuples(index=False))
+    retrieved = {
+        term: {item_ids[position] for position in indices[row]}
+        for row, term in enumerate(q_ids)
+    }
+    hits = sum(
+        str(row.item_id) in retrieved[str(row.term_id)]
+        for row in positives.itertuples(index=False)
+    )
     value = hits / max(1, len(positives))
-    (embedding_dir / "recall_at_100.json").write_text(json.dumps({"recall_at_100": value, "positives": len(positives)}, indent=2))
+    metrics = {"recall_at_100": value, "positives": len(positives)}
+    (embedding_dir / "recall_at_100.json").write_text(json.dumps(metrics, indent=2))
     return value
 
 contrastive_recall = 0.0
 hybrid_contrastive_recall = 0.0
 if MODE == "pilot" and COMPUTE_CONTRASTIVE_RECALL:
-    contrastive_recall = checkpoint_recall_at_100("contrastive_random", models_for_recall["contrastive"])
-    hybrid_contrastive_recall = checkpoint_recall_at_100("contrastive_hybrid", models_for_recall["hybrid"])
+    contrastive_recall = checkpoint_recall_at_100(
+        "contrastive_random", models_for_recall["contrastive"]
+    )
+    hybrid_contrastive_recall = checkpoint_recall_at_100(
+        "contrastive_hybrid", models_for_recall["hybrid"]
+    )
 print({"contrastive_recall_at_100": contrastive_recall,
        "hybrid_contrastive_recall_at_100": hybrid_contrastive_recall})
-'''
-        ),
+"""),
         markdown("## 7. Identical-split ablations and recipe selection"),
-        code(
-            '''if MODE in {"pilot", "confirm"}:
+        code("""if MODE in {"pilot", "confirm"}:
     heldout_folds = {0} if MODE == "pilot" else set(range(5))
     frozen_scores = RUN_DIR / "scores" / "frozen_oof.csv"
-    frozen_frame = slates.loc[slates["fold"].isin(heldout_folds), ["slate_id", "term_id", "item_id", "semantic_cosine", "semantic_rank_pct"]]
+    frozen_frame = slates.loc[
+        slates["fold"].isin(heldout_folds),
+        ["slate_id", "term_id", "item_id", "semantic_cosine", "semantic_rank_pct"],
+    ]
     frozen_frame.to_csv(frozen_scores, index=False)
     arguments = [
         SRC_DIR / "embedding_experiment.py", "optimize-ablations",
@@ -382,23 +433,25 @@ print({"contrastive_recall_at_100": contrastive_recall,
         "--contrastive-recall-at-100", contrastive_recall,
         "--hybrid-contrastive-recall-at-100", hybrid_contrastive_recall,
     ]
-    if contrastive_scores is not None: arguments.extend(["--contrastive-scores", contrastive_scores])
-    if hybrid_scores is not None: arguments.extend(["--hybrid-scores", hybrid_scores])
+    if contrastive_scores is not None:
+        arguments.extend(["--contrastive-scores", contrastive_scores])
+    if hybrid_scores is not None:
+        arguments.extend(["--hybrid-scores", hybrid_scores])
     run_command(arguments)
     display(pd.read_csv(RUN_DIR / "ablation_results.csv"))
     display(json.loads((RUN_DIR / "selected_blend.json").read_text()))
-'''
-        ),
+"""),
         markdown("## 8. Final full-data training, unique-pair scoring, and submission"),
-        code(
-            '''if MODE == "final":
+        code("""if MODE == "final":
     if CONFIRMED_SELECTED_BLEND is None:
         raise ValueError("MODE='final' requires CONFIRMED_SELECTED_BLEND")
     selected = json.loads(Path(CONFIRMED_SELECTED_BLEND).read_text())
     recipe = selected["recipe"]
     final_specs = dict(FINAL_COMPONENTS)
     semantic_scores = RUN_DIR / "final_semantic_scores.csv"
-    required_components = {name for name, weight in selected["weights"].items() if float(weight) > 0}
+    required_components = {
+        name for name, weight in selected["weights"].items() if float(weight) > 0
+    }
 
     # With the fast default (LightGBM + lexical), final mode is self-contained.
     # User-supplied FINAL_COMPONENTS still take precedence when confirmed full
@@ -457,7 +510,9 @@ print({"contrastive_recall_at_100": contrastive_recall,
             )
             frozen = pairs[["id", "term_id", "item_id"]].copy()
             frozen["semantic_cosine"] = scores
-            frozen["semantic_rank_pct"] = frozen.groupby("term_id")["semantic_cosine"].rank(method="average", pct=True)
+            frozen["semantic_rank_pct"] = frozen.groupby("term_id")[
+                "semantic_cosine"
+            ].rank(method="average", pct=True)
             frozen.to_csv(semantic_scores, index=False)
         final_specs["frozen_semantic_cosine"] = (semantic_scores, "semantic_cosine")
 
@@ -475,17 +530,18 @@ print({"contrastive_recall_at_100": contrastive_recall,
             arguments.extend(["--component", f"{name}={path}:{column}"])
     run_command(arguments)
     display(json.loads((RUN_DIR / "submission_fast_hybrid_embedding.report.json").read_text()))
-'''
-        ),
+"""),
         markdown("## 9. Package resumable artifacts"),
-        code(
-            '''if PACKAGE_ARTIFACTS:
-    archive = shutil.make_archive(str(WORK_DIR / f"fast_hybrid_embedding_{MODE}_artifacts"), "gztar", ROOT_OUT)
+        code("""if PACKAGE_ARTIFACTS:
+    archive = shutil.make_archive(
+        str(WORK_DIR / f"fast_hybrid_embedding_{MODE}_artifacts"),
+        "gztar",
+        ROOT_OUT,
+    )
     print(f"packaged {archive}")
 
 print("run complete", {"mode": MODE, "run_dir": str(RUN_DIR), "cache": str(CACHE_DIR)})
-'''
-        ),
+"""),
     ]
 )
 
@@ -497,7 +553,11 @@ notebook = {
     "cells": cells,
     "metadata": {
         "accelerator": "GPU",
-        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "kernelspec": {
+            "display_name": "Python 3",
+            "language": "python",
+            "name": "python3",
+        },
         "language_info": {"name": "python", "version": "3.x"},
     },
     "nbformat": 4,

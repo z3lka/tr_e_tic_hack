@@ -80,7 +80,7 @@ Macro-F1 points.
 ├── requirements.txt
 ├── src/                         # training, retrieval, and scoring modules
 ├── tests/                       # unit and synthetic end-to-end tests
-├── notebooks/                   # exploratory and Kaggle-ready notebooks
+├── notebooks/                   # Kaggle workflows and experiment baselines
 ├── scripts/                     # reproducible notebook generators
 ├── docs/                        # methodology and experiment history
 ├── data/                        # competition files; local only

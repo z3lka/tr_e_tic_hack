@@ -1,3 +1,5 @@
+"""Align, rank-normalize, and blend model scores into competition submissions."""
+
 from __future__ import annotations
 
 import argparse
@@ -5,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 
 SCORE_COLUMNS = ("prob", "score")
 
@@ -18,7 +19,9 @@ def score_col(frame: pd.DataFrame, path: str | Path) -> str:
 
 
 def load_score(path: str | Path, name: str, nrows: int | None = None) -> pd.DataFrame:
-    frame = pd.read_csv(path, dtype={"id": str, "term_id": str}, keep_default_na=False, nrows=nrows)
+    frame = pd.read_csv(
+        path, dtype={"id": str, "term_id": str}, keep_default_na=False, nrows=nrows
+    )
     required = {"id", "term_id"}
     missing = required - set(frame.columns)
     if missing:
@@ -41,16 +44,26 @@ def rank_normalize(frame: pd.DataFrame, column: str, scope: str) -> pd.Series:
     if scope == "global":
         return frame[column].rank(method="average", pct=True).astype("float32")
     if scope == "term":
-        return frame.groupby("term_id", sort=False)[column].rank(method="average", pct=True).astype("float32")
+        return (
+            frame.groupby("term_id", sort=False)[column]
+            .rank(method="average", pct=True)
+            .astype("float32")
+        )
     raise ValueError(f"Unknown rank scope: {scope}")
 
 
-def align_scores(catboost: pd.DataFrame, lgbm: pd.DataFrame, transformer: pd.DataFrame) -> pd.DataFrame:
-    merged = catboost.merge(lgbm[["id", "term_id", "lgbm"]], on="id", how="inner", suffixes=("", "_lgbm"))
+def align_scores(
+    catboost: pd.DataFrame, lgbm: pd.DataFrame, transformer: pd.DataFrame
+) -> pd.DataFrame:
+    merged = catboost.merge(
+        lgbm[["id", "term_id", "lgbm"]], on="id", how="inner", suffixes=("", "_lgbm")
+    )
     if "term_id_lgbm" in merged.columns:
         mismatch = merged["term_id"].ne(merged["term_id_lgbm"])
         if mismatch.any():
-            raise ValueError(f"CatBoost/LGBM term_id mismatch rows={int(mismatch.sum())}")
+            raise ValueError(
+                f"CatBoost/LGBM term_id mismatch rows={int(mismatch.sum())}"
+            )
         merged = merged.drop(columns=["term_id_lgbm"])
 
     merged = merged.merge(
@@ -62,16 +75,22 @@ def align_scores(catboost: pd.DataFrame, lgbm: pd.DataFrame, transformer: pd.Dat
     if "term_id_transformer" in merged.columns:
         mismatch = merged["term_id"].ne(merged["term_id_transformer"])
         if mismatch.any():
-            raise ValueError(f"GBDT/transformer term_id mismatch rows={int(mismatch.sum())}")
+            raise ValueError(
+                f"GBDT/transformer term_id mismatch rows={int(mismatch.sum())}"
+            )
         merged = merged.drop(columns=["term_id_transformer"])
 
     expected = len(catboost)
     if len(merged) != expected:
-        raise ValueError(f"Score files do not align on id: expected={expected:,} merged={len(merged):,}")
+        raise ValueError(
+            f"Score files do not align on id: expected={expected:,} merged={len(merged):,}"
+        )
     return merged
 
 
-def normalized_weighted_sum(columns: list[pd.Series], weights: list[float]) -> pd.Series:
+def normalized_weighted_sum(
+    columns: list[pd.Series], weights: list[float]
+) -> pd.Series:
     total = float(sum(weights))
     if total <= 0:
         raise ValueError("Blend weights must sum to a positive value")
@@ -149,7 +168,9 @@ def make_prediction(
         return prediction
 
     if term_ids is None:
-        raise ValueError("term_ids are required when min_positive_excess_base is enabled")
+        raise ValueError(
+            "term_ids are required when min_positive_excess_base is enabled"
+        )
     if len(term_ids) != len(scores):
         raise ValueError("term_ids and scores must have the same number of rows")
 
@@ -196,7 +217,12 @@ def make_prediction(
 def submit(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    scores = pd.read_csv(args.scores, dtype={"id": str}, keep_default_na=False, nrows=args.limit_rows or None)
+    scores = pd.read_csv(
+        args.scores,
+        dtype={"id": str},
+        keep_default_na=False,
+        nrows=args.limit_rows or None,
+    )
     scores = scores.reset_index(drop=True)
     column = args.score_col or score_col(scores, args.scores)
     scores[column] = pd.to_numeric(scores[column], errors="coerce")
@@ -215,18 +241,25 @@ def submit(args: argparse.Namespace) -> None:
         output.to_csv(output_path, index=False)
         print(
             f"{output_path}: rows={len(output):,} positives={int(prediction.sum()):,} "
-            f"rate={prediction.mean():.5f} min_positive_excess_base={args.min_positive_excess_base}"
+            f"rate={prediction.mean():.5f} "
+            f"min_positive_excess_base={args.min_positive_excess_base}"
         )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Rank-normalized two-level GBDT + transformer blending.")
+    parser = argparse.ArgumentParser(
+        description="Rank-normalized two-level GBDT + transformer blending."
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     blend_cmd = sub.add_parser("blend")
-    blend_cmd.add_argument("--catboost", default="outputs/catboost_category_aware_2026-06-30_scores.csv")
+    blend_cmd.add_argument(
+        "--catboost", default="outputs/catboost_category_aware_2026-06-30_scores.csv"
+    )
     blend_cmd.add_argument("--lgbm", default="outputs/pu_lgbm_v1_scores.csv")
-    blend_cmd.add_argument("--transformer", default="outputs/transformer_biencoder_scores.csv")
+    blend_cmd.add_argument(
+        "--transformer", default="outputs/transformer_biencoder_scores.csv"
+    )
     blend_cmd.add_argument("--output", default="outputs/moe_gbdt_rankblend_scores.csv")
     blend_cmd.add_argument("--catboost-weight", type=float, default=0.70)
     blend_cmd.add_argument("--lgbm-weight", type=float, default=0.30)
@@ -242,7 +275,9 @@ def main() -> None:
     submit_cmd.add_argument("--scores", default="outputs/moe_gbdt_rankblend_scores.csv")
     submit_cmd.add_argument("--output-dir", default="outputs")
     submit_cmd.add_argument("--prefix", default="submission_moe_gbdt_rankblend")
-    submit_cmd.add_argument("--rates", type=float, nargs="+", default=[0.18, 0.20, 0.22, 0.24])
+    submit_cmd.add_argument(
+        "--rates", type=float, nargs="+", default=[0.18, 0.20, 0.22, 0.24]
+    )
     submit_cmd.add_argument("--score-col")
     submit_cmd.add_argument(
         "--min-positive-excess-base",

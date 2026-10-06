@@ -1,3 +1,5 @@
+"""Cache lexical and semantic retrieval, mine negatives, and build validation slates."""
+
 from __future__ import annotations
 
 import argparse
@@ -20,12 +22,25 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 from tqdm import tqdm
 
-
 DEFAULT_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 CACHE_SCHEMA_VERSION = 1
 TEXT_FORMAT_VERSION = "title|brand|category|gender|age_group|attributes:v1"
-ITEM_COLUMNS = ["item_id", "title", "category", "brand", "gender", "age_group", "attributes"]
-NEGATIVE_COLUMNS = ["term_id", "item_id", "negative_source", "source_rank", "source_score"]
+ITEM_COLUMNS = [
+    "item_id",
+    "title",
+    "category",
+    "brand",
+    "gender",
+    "age_group",
+    "attributes",
+]
+NEGATIVE_COLUMNS = [
+    "term_id",
+    "item_id",
+    "negative_source",
+    "source_rank",
+    "source_score",
+]
 BASE_SLATE_COLUMNS = [
     "slate_id",
     "term_id",
@@ -50,7 +65,9 @@ def clean_text(value: object) -> str:
 def normalize_text(value: object) -> str:
     text = clean_text(value).lower().replace("ı", "i")
     text = unicodedata.normalize("NFKD", text)
-    text = "".join(character for character in text if not unicodedata.combining(character))
+    text = "".join(
+        character for character in text if not unicodedata.combining(character)
+    )
     return SPACE_RE.sub(" ", NON_WORD_RE.sub(" ", text)).strip()
 
 
@@ -60,7 +77,11 @@ def build_item_text(row: Any) -> str:
 
 
 def item_search_text(items: pd.DataFrame) -> pd.Series:
-    columns = [column for column in ["title", "brand", "category", "attributes"] if column in items]
+    columns = [
+        column
+        for column in ["title", "brand", "category", "attributes"]
+        if column in items
+    ]
     output = pd.Series("", index=items.index, dtype=object)
     for column in columns:
         values = items[column].map(normalize_text)
@@ -114,7 +135,9 @@ def load_manifest(cache_dir: Path, require_complete: bool = True) -> dict[str, A
         raise FileNotFoundError(f"Missing cache manifest: {path}")
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != CACHE_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported cache schema in {path}: {manifest.get('schema_version')}")
+        raise ValueError(
+            f"Unsupported cache schema in {path}: {manifest.get('schema_version')}"
+        )
     if require_complete and not manifest.get("complete"):
         raise ValueError(f"Cache is incomplete: {path}")
     return manifest
@@ -173,7 +196,9 @@ def encode_pretrained_texts(
     arrays: list[np.ndarray] = []
     amp_enabled = device.type == "cuda"
     with torch.inference_mode():
-        for start in tqdm(range(0, len(texts), batch_size), desc="frozen MiniLM encoding"):
+        for start in tqdm(
+            range(0, len(texts), batch_size), desc="frozen MiniLM encoding"
+        ):
             batch = tokenizer(
                 texts[start : start + batch_size],
                 padding=True,
@@ -182,16 +207,22 @@ def encode_pretrained_texts(
                 return_tensors="pt",
             )
             batch = {key: value.to(device) for key, value in batch.items()}
-            with torch.autocast(device_type=device.type, enabled=amp_enabled, dtype=torch.float16):
+            with torch.autocast(
+                device_type=device.type, enabled=amp_enabled, dtype=torch.float16
+            ):
                 output = model(**batch)
-                embedding = mean_pool(output.last_hidden_state, batch["attention_mask"], torch)
+                embedding = mean_pool(
+                    output.last_hidden_state, batch["attention_mask"], torch
+                )
             arrays.append(embedding.float().cpu().numpy().astype(np.float16))
     if not arrays:
         return np.empty((0, int(model.config.hidden_size)), dtype=np.float16)
     return np.concatenate(arrays, axis=0)
 
 
-def _deterministic_topk(scores: np.ndarray, indices: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+def _deterministic_topk(
+    scores: np.ndarray, indices: np.ndarray, k: int
+) -> tuple[np.ndarray, np.ndarray]:
     if scores.shape != indices.shape:
         raise ValueError("scores and indices must have identical shapes")
     take = min(k, scores.shape[1])
@@ -246,7 +277,9 @@ def exact_cosine_topk(
 
     all_indices = np.empty((len(query_embeddings), k), dtype=np.int32)
     all_scores = np.empty((len(query_embeddings), k), dtype=np.float32)
-    for q_start in tqdm(range(0, len(query_embeddings), query_block_size), desc="exact cosine top-k"):
+    for q_start in tqdm(
+        range(0, len(query_embeddings), query_block_size), desc="exact cosine top-k"
+    ):
         q_stop = min(q_start + query_block_size, len(query_embeddings))
         query = np.asarray(query_embeddings[q_start:q_stop], dtype=np.float32)
         kept_indices = np.empty((len(query), 0), dtype=np.int64)
@@ -267,7 +300,9 @@ def exact_cosine_topk(
             )
             merged_scores = np.concatenate([kept_scores, block_scores], axis=1)
             merged_indices = np.concatenate([kept_indices, block_indices], axis=1)
-            kept_indices, kept_scores = _deterministic_topk(merged_scores, merged_indices, k)
+            kept_indices, kept_scores = _deterministic_topk(
+                merged_scores, merged_indices, k
+            )
         all_indices[q_start:q_stop] = kept_indices.astype(np.int32)
         all_scores[q_start:q_stop] = kept_scores
     return all_indices, all_scores
@@ -328,12 +363,19 @@ def save_retrieval_pool(
 def load_retrieval_pool(cache_dir: Path) -> dict[str, np.ndarray]:
     manifest = load_manifest(cache_dir)
     pool = np.load(cache_paths(cache_dir)["retrieval"], mmap_mode="r")
-    required = {"lexical_indices", "lexical_scores", "embedding_indices", "embedding_scores"}
+    required = {
+        "lexical_indices",
+        "lexical_scores",
+        "embedding_indices",
+        "embedding_scores",
+    }
     missing = required - set(pool.files)
     if missing:
         raise ValueError(f"Retrieval pool is missing arrays: {sorted(missing)}")
     topk = int(manifest["retrieval_topk"])
-    if any(pool[name].shape[1] < topk for name in ["lexical_indices", "embedding_indices"]):
+    if any(
+        pool[name].shape[1] < topk for name in ["lexical_indices", "embedding_indices"]
+    ):
         raise ValueError("Retrieval pool shape does not match its manifest")
     return {name: pool[name] for name in required}
 
@@ -361,7 +403,11 @@ def write_embedding_cache_fixture(
     sparse.save_npz(paths["item_tfidf"], identity_items)
     sparse.save_npz(paths["term_tfidf"], identity_terms)
     save_retrieval_pool(
-        paths["retrieval"], lexical_indices, lexical_scores, embedding_indices, embedding_scores
+        paths["retrieval"],
+        lexical_indices,
+        lexical_scores,
+        embedding_indices,
+        embedding_scores,
     )
     payload: dict[str, object] = {
         "schema_version": CACHE_SCHEMA_VERSION,
@@ -410,21 +456,41 @@ def build_cache(args: argparse.Namespace) -> None:
         previous = json.loads(paths["manifest"].read_text(encoding="utf-8"))
         if previous.get("cache_key") != cache_key:
             raise ValueError(
-                f"Cache configuration changed ({previous.get('cache_key', '')[:12]} -> {cache_key[:12]}). "
+                "Cache configuration changed "
+                f"({previous.get('cache_key', '')[:12]} -> {cache_key[:12]}). "
                 "Use a new --cache-dir or pass --force."
             )
         print(f"resume incomplete cache at {cache_dir} key={cache_key[:12]}")
 
-    incomplete = {**config, "cache_key": cache_key, "complete": False, "started_at": time.time()}
+    incomplete = {
+        **config,
+        "cache_key": cache_key,
+        "complete": False,
+        "started_at": time.time(),
+    }
     paths["manifest"].write_text(json.dumps(incomplete, indent=2), encoding="utf-8")
-    terms = pd.read_csv(
-        data_dir / "terms.csv", usecols=["term_id", "query"], dtype=str, keep_default_na=False,
-        nrows=args.limit_terms or None,
-    ).sort_values("term_id").reset_index(drop=True)
-    items = pd.read_csv(
-        data_dir / "items.csv", usecols=ITEM_COLUMNS, dtype=str, keep_default_na=False,
-        nrows=args.limit_items or None,
-    ).sort_values("item_id").reset_index(drop=True)
+    terms = (
+        pd.read_csv(
+            data_dir / "terms.csv",
+            usecols=["term_id", "query"],
+            dtype=str,
+            keep_default_na=False,
+            nrows=args.limit_terms or None,
+        )
+        .sort_values("term_id")
+        .reset_index(drop=True)
+    )
+    items = (
+        pd.read_csv(
+            data_dir / "items.csv",
+            usecols=ITEM_COLUMNS,
+            dtype=str,
+            keep_default_na=False,
+            nrows=args.limit_items or None,
+        )
+        .sort_values("item_id")
+        .reset_index(drop=True)
+    )
     if len(items) < args.retrieval_topk:
         raise ValueError("Catalog is smaller than retrieval-topk")
     term_ids = terms["term_id"].astype(str).tolist()
@@ -433,7 +499,8 @@ def build_cache(args: argparse.Namespace) -> None:
     item_texts = [build_item_text(row) for row in items.itertuples(index=False)]
 
     embedding_stage_complete = all(
-        paths[name].exists() for name in ["term_ids", "item_ids", "term_embeddings", "item_embeddings"]
+        paths[name].exists()
+        for name in ["term_ids", "item_ids", "term_embeddings", "item_embeddings"]
     )
     if embedding_stage_complete and not args.force:
         cached_term_ids = pd.read_csv(paths["term_ids"], dtype=str)["term_id"].tolist()
@@ -446,10 +513,18 @@ def build_cache(args: argparse.Namespace) -> None:
             embedding_stage_complete = False
     if not embedding_stage_complete or args.force:
         term_embeddings = encode_pretrained_texts(
-            term_texts, args.model_name, args.query_max_length, args.encode_batch_size, args.device
+            term_texts,
+            args.model_name,
+            args.query_max_length,
+            args.encode_batch_size,
+            args.device,
         )
         item_embeddings = encode_pretrained_texts(
-            item_texts, args.model_name, args.item_max_length, args.encode_batch_size, args.device
+            item_texts,
+            args.model_name,
+            args.item_max_length,
+            args.encode_batch_size,
+            args.device,
         )
         pd.DataFrame({"term_id": term_ids}).to_csv(paths["term_ids"], index=False)
         pd.DataFrame({"item_id": item_ids}).to_csv(paths["item_ids"], index=False)
@@ -458,7 +533,9 @@ def build_cache(args: argparse.Namespace) -> None:
 
     term_norm = terms["query"].map(normalize_text)
     item_norm = item_search_text(items)
-    tfidf_stage_complete = all(paths[name].exists() for name in ["vectorizer", "term_tfidf", "item_tfidf"])
+    tfidf_stage_complete = all(
+        paths[name].exists() for name in ["vectorizer", "term_tfidf", "item_tfidf"]
+    )
     if tfidf_stage_complete and not args.force:
         term_tfidf = sparse.load_npz(paths["term_tfidf"]).tocsr()
         item_tfidf = sparse.load_npz(paths["item_tfidf"]).tocsr()
@@ -488,7 +565,12 @@ def build_cache(args: argparse.Namespace) -> None:
         expected_shape = (len(terms), args.retrieval_topk)
         retrieval_stage_complete = all(
             existing_pool[name].shape == expected_shape
-            for name in ["lexical_indices", "lexical_scores", "embedding_indices", "embedding_scores"]
+            for name in [
+                "lexical_indices",
+                "lexical_scores",
+                "embedding_indices",
+                "embedding_scores",
+            ]
         )
     else:
         retrieval_stage_complete = False
@@ -507,7 +589,11 @@ def build_cache(args: argparse.Namespace) -> None:
             term_tfidf, item_tfidf, args.retrieval_topk
         )
         save_retrieval_pool(
-            paths["retrieval"], lexical_indices, lexical_scores, embedding_indices, embedding_scores
+            paths["retrieval"],
+            lexical_indices,
+            lexical_scores,
+            embedding_indices,
+            embedding_scores,
         )
     manifest = {
         **config,
@@ -525,8 +611,10 @@ def build_cache(args: argparse.Namespace) -> None:
 
 def load_positive_pairs(data_dir: Path) -> pd.DataFrame:
     frame = pd.read_csv(
-        data_dir / "training_pairs.csv", usecols=lambda column: column in {"term_id", "item_id", "label"},
-        dtype=str, keep_default_na=False,
+        data_dir / "training_pairs.csv",
+        usecols=lambda column: column in {"term_id", "item_id", "label"},
+        dtype=str,
+        keep_default_na=False,
     )
     if "label" in frame:
         frame = frame.loc[frame["label"].ne("0")]
@@ -537,24 +625,41 @@ def load_positive_pairs(data_dir: Path) -> pd.DataFrame:
 
 
 class ConservativeNegativeFilter:
+    """Reject known positives and near-duplicate items during negative mining."""
+
     def __init__(self, items: pd.DataFrame, positives: pd.DataFrame):
         self.item_ids = items["item_id"].astype(str).to_numpy()
-        self.position_by_id = {item_id: position for position, item_id in enumerate(self.item_ids)}
+        self.position_by_id = {
+            item_id: position for position, item_id in enumerate(self.item_ids)
+        }
         self.keys = np.asarray(
-            [f"{normalize_text(row.title)}\t{normalize_text(row.brand)}" for row in items.itertuples(index=False)],
+            [
+                f"{normalize_text(row.title)}\t{normalize_text(row.brand)}"
+                for row in items.itertuples(index=False)
+            ],
             dtype=object,
         )
-        self.tokens = [frozenset(normalize_text(value).split()) for value in items["title"]]
+        self.tokens = [
+            frozenset(normalize_text(value).split()) for value in items["title"]
+        ]
         self.positive_ids: dict[str, set[str]] = {}
         self.positive_keys: dict[str, set[str]] = {}
         self.positive_tokens: dict[str, list[frozenset[str]]] = {}
         for term_id, group in positives.groupby("term_id", sort=False):
             ids = set(group["item_id"].astype(str))
-            positions = [self.position_by_id[item_id] for item_id in ids if item_id in self.position_by_id]
+            positions = [
+                self.position_by_id[item_id]
+                for item_id in ids
+                if item_id in self.position_by_id
+            ]
             term = str(term_id)
             self.positive_ids[term] = ids
-            self.positive_keys[term] = {str(self.keys[position]) for position in positions}
-            self.positive_tokens[term] = [self.tokens[position] for position in positions]
+            self.positive_keys[term] = {
+                str(self.keys[position]) for position in positions
+            }
+            self.positive_tokens[term] = [
+                self.tokens[position] for position in positions
+            ]
 
     @staticmethod
     def jaccard(left: frozenset[str], right: frozenset[str]) -> float:
@@ -570,7 +675,10 @@ class ConservativeNegativeFilter:
         if str(self.keys[position]) in self.positive_keys.get(term_id, set()):
             return False
         tokens = self.tokens[position]
-        return all(self.jaccard(tokens, positive) < 0.90 for positive in self.positive_tokens.get(term_id, []))
+        return all(
+            self.jaccard(tokens, positive) < 0.90
+            for positive in self.positive_tokens.get(term_id, [])
+        )
 
 
 def _rank_band_candidates(
@@ -631,7 +739,9 @@ def _sample_uniform_positions(
             if len(output) == count:
                 break
     if len(output) != count:
-        raise ValueError(f"Could not sample {count} valid unique negatives for term {term_id}")
+        raise ValueError(
+            f"Could not sample {count} valid unique negatives for term {term_id}"
+        )
     return output
 
 
@@ -644,16 +754,24 @@ def mine_negative_rows(
     recipe: str,
 ) -> list[dict[str, object]]:
     if recipe == "contrastive":
-        source_specs = [("tfidf_semi_hard", "lexical", 101, 500, 10), ("embedding_semi_hard", "embedding", 101, 500, 10)]
+        source_specs = [
+            ("tfidf_semi_hard", "lexical", 101, 500, 10),
+            ("embedding_semi_hard", "embedding", 101, 500, 10),
+        ]
         uniform_count = 0
     elif recipe == "reranker":
-        source_specs = [("tfidf_near_hard", "lexical", 21, 200, 15), ("embedding_near_hard", "embedding", 21, 200, 15)]
+        source_specs = [
+            ("tfidf_near_hard", "lexical", 21, 200, 15),
+            ("embedding_near_hard", "embedding", 21, 200, 15),
+        ]
         uniform_count = 20
     else:
         raise ValueError(f"Unknown negative recipe: {recipe}")
 
     rows: list[dict[str, object]] = []
-    for term_id in tqdm(sorted(set(str(value) for value in term_ids)), desc=f"mine {recipe} negatives"):
+    for term_id in tqdm(
+        sorted(set(str(value) for value in term_ids)), desc=f"mine {recipe} negatives"
+    ):
         if term_id not in term_position:
             raise KeyError(f"Term {term_id} is absent from the retrieval cache")
         row_position = term_position[term_id]
@@ -664,20 +782,38 @@ def mine_negative_rows(
                 term_id, uniform_count, negative_filter, selected, term_rng
             ):
                 rows.append(
-                    {"term_id": term_id, "item_id": negative_filter.item_ids[position], "negative_source": "uniform_random", "source_rank": 0, "source_score": 0.0}
+                    {
+                        "term_id": term_id,
+                        "item_id": negative_filter.item_ids[position],
+                        "negative_source": "uniform_random",
+                        "source_rank": 0,
+                        "source_score": 0.0,
+                    }
                 )
 
         for source_name, array_prefix, low_rank, high_rank, count in source_specs:
             ranked_positions = pool[f"{array_prefix}_indices"][row_position]
             ranked_scores = pool[f"{array_prefix}_scores"][row_position]
             eligible = _rank_band_candidates(
-                term_id, ranked_positions, ranked_scores, low_rank, high_rank, negative_filter, selected
+                term_id,
+                ranked_positions,
+                ranked_scores,
+                low_rank,
+                high_rank,
+                negative_filter,
+                selected,
             )
             chosen = _sample_rank_band(eligible, count, term_rng)
             for position, rank, score in chosen:
                 selected.add(position)
                 rows.append(
-                    {"term_id": term_id, "item_id": negative_filter.item_ids[position], "negative_source": source_name, "source_rank": rank, "source_score": score}
+                    {
+                        "term_id": term_id,
+                        "item_id": negative_filter.item_ids[position],
+                        "negative_source": source_name,
+                        "source_rank": rank,
+                        "source_score": score,
+                    }
                 )
             shortage = count - len(chosen)
             if shortage:
@@ -685,25 +821,43 @@ def mine_negative_rows(
                     term_id, shortage, negative_filter, selected, term_rng
                 ):
                     rows.append(
-                        {"term_id": term_id, "item_id": negative_filter.item_ids[position], "negative_source": f"uniform_backfill_{array_prefix}", "source_rank": 0, "source_score": 0.0}
+                        {
+                            "term_id": term_id,
+                            "item_id": negative_filter.item_ids[position],
+                            "negative_source": f"uniform_backfill_{array_prefix}",
+                            "source_rank": 0,
+                            "source_score": 0.0,
+                        }
                     )
     return rows
 
 
 def write_negative_output(
-    rows: list[dict[str, object]], output: Path, positives: pd.DataFrame, recipe: str, seed: int
+    rows: list[dict[str, object]],
+    output: Path,
+    positives: pd.DataFrame,
+    recipe: str,
+    seed: int,
 ) -> None:
     frame = pd.DataFrame(rows, columns=NEGATIVE_COLUMNS)
     if frame.duplicated(["term_id", "item_id"]).any():
         raise AssertionError("Duplicate mined negative pairs")
-    positive_keys = set(positives["term_id"].astype(str) + "\t" + positives["item_id"].astype(str))
+    positive_keys = set(
+        positives["term_id"].astype(str) + "\t" + positives["item_id"].astype(str)
+    )
     mined_keys = frame["term_id"].astype(str) + "\t" + frame["item_id"].astype(str)
     if mined_keys.isin(positive_keys).any():
         raise AssertionError("A mined negative overlaps a known positive")
     ranked = frame.loc[frame["source_rank"].astype(int).gt(0)]
-    if recipe == "contrastive" and not ranked["source_rank"].astype(int).between(101, 500).all():
+    if (
+        recipe == "contrastive"
+        and not ranked["source_rank"].astype(int).between(101, 500).all()
+    ):
         raise AssertionError("Contrastive negative rank outside 101..500")
-    if recipe == "reranker" and not ranked["source_rank"].astype(int).between(21, 200).all():
+    if (
+        recipe == "reranker"
+        and not ranked["source_rank"].astype(int).between(21, 200).all()
+    ):
         raise AssertionError("Reranker negative rank outside 21..200")
     output.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output, index=False)
@@ -716,16 +870,29 @@ def write_negative_output(
         "duplicates": int(frame.duplicated(["term_id", "item_id"]).sum()),
         "positive_overlaps": int(mined_keys.isin(positive_keys).sum()),
         "source_counts": dict(sorted(source_counts.items())),
-        "source_ratios": {key: value / max(1, len(frame)) for key, value in sorted(source_counts.items())},
+        "source_ratios": {
+            key: value / max(1, len(frame))
+            for key, value in sorted(source_counts.items())
+        },
     }
-    output.with_suffix(".audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
+    output.with_suffix(".audit.json").write_text(
+        json.dumps(audit, indent=2), encoding="utf-8"
+    )
     print(f"wrote {output} rows={len(frame):,}")
 
 
 def load_cache_ids(cache_dir: Path) -> tuple[list[str], list[str]]:
     paths = cache_paths(cache_dir)
-    item_ids = pd.read_csv(paths["item_ids"], dtype=str, keep_default_na=False)["item_id"].astype(str).tolist()
-    term_ids = pd.read_csv(paths["term_ids"], dtype=str, keep_default_na=False)["term_id"].astype(str).tolist()
+    item_ids = (
+        pd.read_csv(paths["item_ids"], dtype=str, keep_default_na=False)["item_id"]
+        .astype(str)
+        .tolist()
+    )
+    term_ids = (
+        pd.read_csv(paths["term_ids"], dtype=str, keep_default_na=False)["term_id"]
+        .astype(str)
+        .tolist()
+    )
     return item_ids, term_ids
 
 
@@ -740,18 +907,32 @@ def run_miner(args: argparse.Namespace, recipe: str) -> None:
     item_ids, term_ids = load_cache_ids(cache_dir)
     term_position = {term_id: position for position, term_id in enumerate(term_ids)}
     positives = load_positive_pairs(data_dir)
-    positives = positives.loc[positives["term_id"].isin(term_position)].reset_index(drop=True)
+    positives = positives.loc[positives["term_id"].isin(term_position)].reset_index(
+        drop=True
+    )
     if args.limit_terms:
         keep_terms = sorted(positives["term_id"].unique())[: args.limit_terms]
-        positives = positives.loc[positives["term_id"].isin(keep_terms)].reset_index(drop=True)
-    items = pd.read_csv(data_dir / "items.csv", usecols=["item_id", "title", "brand"], dtype=str, keep_default_na=False)
+        positives = positives.loc[positives["term_id"].isin(keep_terms)].reset_index(
+            drop=True
+        )
+    items = pd.read_csv(
+        data_dir / "items.csv",
+        usecols=["item_id", "title", "brand"],
+        dtype=str,
+        keep_default_na=False,
+    )
     items = items.set_index("item_id").reindex(item_ids).reset_index()
     if items[["title", "brand"]].isna().any().any():
         raise KeyError("Some cached catalog IDs are missing from items.csv")
     negative_filter = ConservativeNegativeFilter(items, positives)
     pool = load_retrieval_pool(cache_dir)
     rows = mine_negative_rows(
-        positives["term_id"].unique(), term_position, pool, negative_filter, args.seed, recipe
+        positives["term_id"].unique(),
+        term_position,
+        pool,
+        negative_filter,
+        args.seed,
+        recipe,
     )
     output_path = Path(args.output)
     write_negative_output(rows, output_path, positives, recipe, args.seed)
@@ -762,18 +943,34 @@ def run_miner(args: argparse.Namespace, recipe: str) -> None:
     audit_path.write_text(json.dumps(audit, indent=2), encoding="utf-8")
 
 
-def make_term_split_manifest(positives: pd.DataFrame, mode: str, seed: int) -> pd.DataFrame:
-    counts = positives.groupby("term_id", sort=True).size().rename("n_positives").reset_index()
+def make_term_split_manifest(
+    positives: pd.DataFrame, mode: str, seed: int
+) -> pd.DataFrame:
+    counts = (
+        positives.groupby("term_id", sort=True)
+        .size()
+        .rename("n_positives")
+        .reset_index()
+    )
     counts["fold"] = np.int16(-1)
     if mode == "pilot":
         if len(counts) < 2:
             raise ValueError("Pilot split requires at least two terms")
         n_bins = max(1, min(10, len(counts) // 5))
-        bins = pd.qcut(counts["n_positives"].rank(method="first"), q=n_bins, labels=False, duplicates="drop").astype(int)
+        bins = pd.qcut(
+            counts["n_positives"].rank(method="first"),
+            q=n_bins,
+            labels=False,
+            duplicates="drop",
+        ).astype(int)
         n_holdout = min(len(counts) - 1, max(1, int(round(0.20 * len(counts)))))
         try:
-            splitter = StratifiedShuffleSplit(n_splits=1, test_size=n_holdout, random_state=seed)
-            train_index, holdout_index = next(splitter.split(np.zeros(len(counts)), bins))
+            splitter = StratifiedShuffleSplit(
+                n_splits=1, test_size=n_holdout, random_state=seed
+            )
+            train_index, holdout_index = next(
+                splitter.split(np.zeros(len(counts)), bins)
+            )
         except ValueError:
             rng = np.random.default_rng(seed)
             order = rng.permutation(len(counts))
@@ -785,9 +982,16 @@ def make_term_split_manifest(positives: pd.DataFrame, mode: str, seed: int) -> p
         if len(counts) < 5:
             raise ValueError("Confirm split requires at least five terms")
         n_bins = max(1, min(10, len(counts) // 5))
-        bins = pd.qcut(counts["n_positives"].rank(method="first"), q=n_bins, labels=False, duplicates="drop").astype(int)
+        bins = pd.qcut(
+            counts["n_positives"].rank(method="first"),
+            q=n_bins,
+            labels=False,
+            duplicates="drop",
+        ).astype(int)
         splitter = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
-        for fold, (_, valid_index) in enumerate(splitter.split(np.zeros(len(counts)), bins)):
+        for fold, (_, valid_index) in enumerate(
+            splitter.split(np.zeros(len(counts)), bins)
+        ):
             counts.loc[valid_index, "fold"] = np.int16(fold)
         counts["split"] = "oof"
     elif mode == "final":
@@ -814,11 +1018,14 @@ def build_slates(args: argparse.Namespace) -> None:
     term_position = {term_id: position for position, term_id in enumerate(term_ids)}
     positives = load_positive_pairs(data_dir)
     positives = positives.loc[
-        positives["term_id"].isin(term_position) & positives["item_id"].isin(item_position)
+        positives["term_id"].isin(term_position)
+        & positives["item_id"].isin(item_position)
     ].reset_index(drop=True)
     if args.limit_terms:
         kept = sorted(positives["term_id"].unique())[: args.limit_terms]
-        positives = positives.loc[positives["term_id"].isin(kept)].reset_index(drop=True)
+        positives = positives.loc[positives["term_id"].isin(kept)].reset_index(
+            drop=True
+        )
     split = make_term_split_manifest(positives, args.mode, args.seed)
     split_path = output_dir / "split_manifest.csv"
     split.to_csv(split_path, index=False)
@@ -826,7 +1033,9 @@ def build_slates(args: argparse.Namespace) -> None:
     split_by_term = split.set_index("term_id")["split"].astype(str).to_dict()
 
     positive_positions = {
-        str(term_id): [item_position[item_id] for item_id in group["item_id"].astype(str)]
+        str(term_id): [
+            item_position[item_id] for item_id in group["item_id"].astype(str)
+        ]
         for term_id, group in positives.groupby("term_id", sort=False)
     }
     pool = load_retrieval_pool(cache_dir)
@@ -840,8 +1049,14 @@ def build_slates(args: argparse.Namespace) -> None:
         tpos = term_position[term_id]
         lexical = [int(value) for value in pool["lexical_indices"][tpos, :40]]
         embedding = [int(value) for value in pool["embedding_indices"][tpos, :40]]
-        lexical_meta = {position: (rank, float(pool["lexical_scores"][tpos, rank - 1])) for rank, position in enumerate(lexical, 1)}
-        embedding_meta = {position: (rank, float(pool["embedding_scores"][tpos, rank - 1])) for rank, position in enumerate(embedding, 1)}
+        lexical_meta = {
+            position: (rank, float(pool["lexical_scores"][tpos, rank - 1]))
+            for rank, position in enumerate(lexical, 1)
+        }
+        embedding_meta = {
+            position: (rank, float(pool["embedding_scores"][tpos, rank - 1]))
+            for rank, position in enumerate(embedding, 1)
+        }
         positives_for_term = set(positive_positions[term_id])
         selected = set(lexical) | set(embedding)
         rng = np.random.default_rng(stable_seed(args.seed, args.mode, "slate", term_id))
@@ -855,13 +1070,23 @@ def build_slates(args: argparse.Namespace) -> None:
         base_positions = list(dict.fromkeys([*lexical, *embedding, *uniform]))
         appended = sorted(positives_for_term - set(base_positions))
         candidates = base_positions + appended
-        cosine = np.asarray(item_embeddings[candidates], dtype=np.float32) @ np.asarray(term_embeddings[tpos], dtype=np.float32)
-        semantic_pct = pd.Series(cosine).rank(method="average", pct=True).to_numpy(dtype=np.float32)
+        cosine = np.asarray(item_embeddings[candidates], dtype=np.float32) @ np.asarray(
+            term_embeddings[tpos], dtype=np.float32
+        )
+        semantic_pct = (
+            pd.Series(cosine)
+            .rank(method="average", pct=True)
+            .to_numpy(dtype=np.float32)
+        )
         lexical_100 = set(int(value) for value in pool["lexical_indices"][tpos, :100])
-        embedding_100 = set(int(value) for value in pool["embedding_indices"][tpos, :100])
+        embedding_100 = set(
+            int(value) for value in pool["embedding_indices"][tpos, :100]
+        )
         retrieval_counts["tfidf_hits"] += len(positives_for_term & lexical_100)
         retrieval_counts["embedding_hits"] += len(positives_for_term & embedding_100)
-        retrieval_counts["hybrid_hits"] += len(positives_for_term & (lexical_100 | embedding_100))
+        retrieval_counts["hybrid_hits"] += len(
+            positives_for_term & (lexical_100 | embedding_100)
+        )
 
         for local_index, position in enumerate(candidates):
             sources: list[str] = []
@@ -896,7 +1121,9 @@ def build_slates(args: argparse.Namespace) -> None:
             )
     slate = pd.DataFrame(rows)
     if int(slate["label"].sum()) != total_positives:
-        raise AssertionError("Every known positive must occur exactly once in its validation slate")
+        raise AssertionError(
+            "Every known positive must occur exactly once in its validation slate"
+        )
     slate_path = output_dir / "hybrid_validation_slates.csv"
     slate.to_csv(slate_path, index=False)
     metrics = {
@@ -906,17 +1133,23 @@ def build_slates(args: argparse.Namespace) -> None:
         "terms": int(slate["term_id"].nunique()),
         "positives": total_positives,
         "tfidf_recall_at_100": retrieval_counts["tfidf_hits"] / max(1, total_positives),
-        "frozen_embedding_recall_at_100": retrieval_counts["embedding_hits"] / max(1, total_positives),
-        "hybrid_recall_at_100": retrieval_counts["hybrid_hits"] / max(1, total_positives),
+        "frozen_embedding_recall_at_100": retrieval_counts["embedding_hits"]
+        / max(1, total_positives),
+        "hybrid_recall_at_100": retrieval_counts["hybrid_hits"]
+        / max(1, total_positives),
         "cache_fingerprint": manifest["cache_key"],
         "elapsed_seconds": time.time() - started,
     }
-    (output_dir / "retrieval_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (output_dir / "retrieval_metrics.json").write_text(
+        json.dumps(metrics, indent=2), encoding="utf-8"
+    )
     print(json.dumps(metrics, indent=2))
     print(f"wrote {slate_path}")
 
 
-def add_common_mining_arguments(parser: argparse.ArgumentParser, default_output: str) -> None:
+def add_common_mining_arguments(
+    parser: argparse.ArgumentParser, default_output: str
+) -> None:
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--cache-dir", default="outputs/hybrid_embedding/frozen_cache")
     parser.add_argument("--output", default=default_output)
@@ -925,12 +1158,16 @@ def add_common_mining_arguments(parser: argparse.ArgumentParser, default_output:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cached exact hybrid retrieval and conservative negative mining.")
+    parser = argparse.ArgumentParser(
+        description="Cached exact hybrid retrieval and conservative negative mining."
+    )
     sub = parser.add_subparsers(dest="operation", required=True)
 
     cache_cmd = sub.add_parser("build-cache")
     cache_cmd.add_argument("--data-dir", default="data")
-    cache_cmd.add_argument("--cache-dir", default="outputs/hybrid_embedding/frozen_cache")
+    cache_cmd.add_argument(
+        "--cache-dir", default="outputs/hybrid_embedding/frozen_cache"
+    )
     cache_cmd.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     cache_cmd.add_argument("--query-max-length", type=int, default=48)
     cache_cmd.add_argument("--item-max-length", type=int, default=128)
@@ -947,18 +1184,26 @@ def main() -> None:
     cache_cmd.set_defaults(func=build_cache)
 
     contrastive_cmd = sub.add_parser("mine-contrastive")
-    add_common_mining_arguments(contrastive_cmd, "outputs/hybrid_embedding/contrastive_negative_pool.csv")
+    add_common_mining_arguments(
+        contrastive_cmd, "outputs/hybrid_embedding/contrastive_negative_pool.csv"
+    )
     contrastive_cmd.set_defaults(func=lambda args: run_miner(args, "contrastive"))
 
     reranker_cmd = sub.add_parser("mine-reranker")
-    add_common_mining_arguments(reranker_cmd, "outputs/hybrid_embedding/reranker_negatives.csv")
+    add_common_mining_arguments(
+        reranker_cmd, "outputs/hybrid_embedding/reranker_negatives.csv"
+    )
     reranker_cmd.set_defaults(func=lambda args: run_miner(args, "reranker"))
 
     slate_cmd = sub.add_parser("build-slates")
     slate_cmd.add_argument("--data-dir", default="data")
-    slate_cmd.add_argument("--cache-dir", default="outputs/hybrid_embedding/frozen_cache")
+    slate_cmd.add_argument(
+        "--cache-dir", default="outputs/hybrid_embedding/frozen_cache"
+    )
     slate_cmd.add_argument("--output-dir", default="outputs/hybrid_embedding/pilot")
-    slate_cmd.add_argument("--mode", choices=["pilot", "confirm", "final"], default="pilot")
+    slate_cmd.add_argument(
+        "--mode", choices=["pilot", "confirm", "final"], default="pilot"
+    )
     slate_cmd.add_argument("--seed", type=int, default=42)
     slate_cmd.add_argument("--limit-terms", type=int, default=0)
     slate_cmd.set_defaults(func=build_slates)
